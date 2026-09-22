@@ -1,0 +1,275 @@
+/**
+ * Network Devices & Journey Simulation Logic (L2 Switch & L3 Router)
+ */
+
+import { NetworkDevice, NetworkHop } from '../types/network';
+
+export const NETWORK_DEVICES: Record<string, NetworkDevice> = {
+  pc1: {
+    id: 'pc1',
+    name: 'PC Client (Hôte A)',
+    type: 'HOST',
+    osiLayerMax: 7,
+    ipAddress: '192.168.1.10',
+    macAddress: '00:1A:2B:3C:4D:5E',
+    interfaces: [
+      {
+        portName: 'eth0',
+        ip: '192.168.1.10',
+        mac: '00:1A:2B:3C:4D:5E',
+        connectedToDeviceId: 'sw1',
+      },
+    ],
+  },
+  sw1: {
+    id: 'sw1',
+    name: 'Commutateur Local (Switch L2 - SW-LAN1)',
+    type: 'SWITCH',
+    osiLayerMax: 2,
+    macAddress: 'F0:1F:AF:01:02:03',
+    interfaces: [
+      { portName: 'Fa0/1', mac: 'F0:1F:AF:01:02:01', connectedToDeviceId: 'pc1' },
+      { portName: 'Gi0/1', mac: 'F0:1F:AF:01:02:02', connectedToDeviceId: 'r1' },
+    ],
+    macTable: {
+      '00:1A:2B:3C:4D:5E': 'Fa0/1 (PC Client)',
+      'AA:BB:CC:11:22:33': 'Gi0/1 (Routeur Int. eth0)',
+    },
+  },
+  r1: {
+    id: 'r1',
+    name: 'Routeur Passerelle (Router L3 - R-CORE)',
+    type: 'ROUTER',
+    osiLayerMax: 3,
+    macAddress: 'AA:BB:CC:11:22:33',
+    ipAddress: '192.168.1.1',
+    interfaces: [
+      {
+        portName: 'eth0 (LAN 1)',
+        ip: '192.168.1.1',
+        mac: 'AA:BB:CC:11:22:33',
+        connectedToDeviceId: 'sw1',
+      },
+      {
+        portName: 'eth1 (WAN / LAN 2)',
+        ip: '198.51.100.1',
+        mac: 'AA:BB:CC:44:55:66',
+        connectedToDeviceId: 'sw2',
+      },
+    ],
+    routingTable: [
+      {
+        destinationNet: '192.168.1.0',
+        netmask: '255.255.255.0 (/24)',
+        nextHop: 'Directement connecté',
+        interfaceName: 'eth0',
+      },
+      {
+        destinationNet: '198.51.100.0',
+        netmask: '255.255.255.0 (/24)',
+        nextHop: 'Directement connecté',
+        interfaceName: 'eth1',
+      },
+      {
+        destinationNet: '0.0.0.0 (Par défaut)',
+        netmask: '0.0.0.0 (/0)',
+        nextHop: '203.0.113.1 (ISP Gateway)',
+        interfaceName: 'wan0',
+      },
+    ],
+  },
+  sw2: {
+    id: 'sw2',
+    name: 'Commutateur Distant (Switch L2 - SW-LAN2)',
+    type: 'SWITCH',
+    osiLayerMax: 2,
+    macAddress: 'F0:2F:BF:04:05:06',
+    interfaces: [
+      { portName: 'Gi0/1', mac: 'F0:2F:BF:04:05:01', connectedToDeviceId: 'r1' },
+      { portName: 'Fa0/24', mac: 'F0:2F:BF:04:05:02', connectedToDeviceId: 'server1' },
+    ],
+    macTable: {
+      'AA:BB:CC:44:55:66': 'Gi0/1 (Routeur Int. eth1)',
+      '70:85:C2:A1:B2:C3': 'Fa0/24 (Serveur Web)',
+    },
+  },
+  server1: {
+    id: 'server1',
+    name: 'Serveur Web B (Hôte B)',
+    type: 'SERVER',
+    osiLayerMax: 7,
+    ipAddress: '198.51.100.25',
+    macAddress: '70:85:C2:A1:B2:C3',
+    interfaces: [
+      {
+        portName: 'eth0',
+        ip: '198.51.100.25',
+        mac: '70:85:C2:A1:B2:C3',
+        connectedToDeviceId: 'sw2',
+      },
+    ],
+  },
+};
+
+/**
+ * Pure generator creating detailed step-by-step hops for packet journey
+ */
+export const generateNetworkHops = (): NetworkHop[] => [
+  {
+    stepIndex: 1,
+    fromDeviceId: 'pc1',
+    toDeviceId: 'sw1',
+    deviceProcessingId: 'pc1',
+    descriptionFr: 'Hôte A (PC Client) : Encapsulation complète et émission de la trame Ethernet',
+    layerInspected: 7,
+    actionType: 'GENERATE',
+    beforeHeaders: {
+      srcMac: '00:1A:2B:3C:4D:5E (PC1)',
+      dstMac: 'AA:BB:CC:11:22:33 (Passerelle R1 eth0)',
+      srcIp: '192.168.1.10 (PC1)',
+      dstIp: '198.51.100.25 (Serveur B)',
+      ttl: 64,
+      crc32: '0xCBF43926',
+    },
+    afterHeaders: {
+      srcMac: '00:1A:2B:3C:4D:5E',
+      dstMac: 'AA:BB:CC:11:22:33',
+      srcIp: '192.168.1.10',
+      dstIp: '198.51.100.25',
+      ttl: 64,
+      crc32: '0xCBF43926',
+    },
+    explanationFr: [
+      'Le PC Client sait que 198.51.100.25 n’est pas dans son sous-réseau local (192.168.1.0/24).',
+      'Il encapsule le paquet IP vers la MAC de sa passerelle par défaut (Routeur R1: AA:BB:CC:11:22:33) via ARP.',
+      'Le paquet IP conserve son IP destination finale (198.51.100.25) et son TTL initial (64).',
+      'Le CRC32 FCS est calculé et appendu à la fin de la trame Ethernet.',
+    ],
+  },
+  {
+    stepIndex: 2,
+    fromDeviceId: 'pc1',
+    toDeviceId: 'r1',
+    deviceProcessingId: 'sw1',
+    descriptionFr: 'Commutateur L2 (Switch SW-LAN1) : Commutation transparente de niveau 2',
+    layerInspected: 2,
+    actionType: 'L2_COMMUTATION',
+    beforeHeaders: {
+      srcMac: '00:1A:2B:3C:4D:5E',
+      dstMac: 'AA:BB:CC:11:22:33',
+      srcIp: '192.168.1.10',
+      dstIp: '198.51.100.25',
+      ttl: 64,
+      crc32: '0xCBF43926',
+    },
+    afterHeaders: {
+      srcMac: '00:1A:2B:3C:4D:5E (Inchangé)',
+      dstMac: 'AA:BB:CC:11:22:33 (Inchangé)',
+      srcIp: '192.168.1.10 (Inchangé)',
+      dstIp: '198.51.100.25 (Inchangé)',
+      ttl: 64,
+      crc32: '0xCBF43926',
+    },
+    explanationFr: [
+      'Le commutateur ne lit QUE l’en-tête de niveau 2 (Couche Liaison). Il ignore totalement les couches 3, 4 et 7.',
+      'Il apprend l’adresse MAC source (00:1A:2B:3C:4D:5E sur Fa0/1) dans sa table CAM.',
+      'Il recherche l’adresse MAC destination (AA:BB:CC:11:22:33) dans sa table CAM -> trouvée sur le port Gi0/1 vers R1.',
+      'Règle clé : Le switch ne modifie AUCUN octet de la trame. Les adresses MAC, IP et le TTL restent 100% identiques.',
+    ],
+  },
+  {
+    stepIndex: 3,
+    fromDeviceId: 'sw1',
+    toDeviceId: 'r1',
+    deviceProcessingId: 'r1',
+    descriptionFr: 'Routeur L3 (Router R-CORE) : Routage IP, décrémentation TTL et réécriture MAC',
+    layerInspected: 3,
+    actionType: 'L3_ROUTING',
+    beforeHeaders: {
+      srcMac: '00:1A:2B:3C:4D:5E (PC1)',
+      dstMac: 'AA:BB:CC:11:22:33 (R1 eth0)',
+      srcIp: '192.168.1.10',
+      dstIp: '198.51.100.25',
+      ttl: 64,
+      crc32: '0xCBF43926',
+    },
+    afterHeaders: {
+      srcMac: 'AA:BB:CC:44:55:66 (R1 eth1)',
+      dstMac: '70:85:C2:A1:B2:C3 (Serveur B)',
+      srcIp: '192.168.1.10 (Intact)',
+      dstIp: '198.51.100.25 (Intact)',
+      ttl: 63,
+      crc32: '0x8E192B4A',
+    },
+    explanationFr: [
+      '1. Désencapsulation L2 : R1 retire l’ancienne trame Ethernet (l’ancienne MAC source et MAC dest sont jetées).',
+      '2. Inspection L3 : Le routeur lit l’adresse IP de destination (198.51.100.25) dans sa table de routage.',
+      '3. Décrémentation TTL : Le TTL passe de 64 à 63 (protection contre les boucles de routage).',
+      '4. Recalcul Checksum IPv4 : Comme le TTL a changé, la somme de contrôle IP est obligatoirement recalculée.',
+      '5. Ré-encapsulation L2 : R1 crée une NOUVELLE trame Ethernet avec sa MAC de sortie eth1 (AA:BB:CC:44:55:66) en source et la MAC du Serveur B (70:85:C2:A1:B2:C3) en destination.',
+      '6. Nouveau CRC32 FCS généré sur la nouvelle trame.',
+    ],
+  },
+  {
+    stepIndex: 4,
+    fromDeviceId: 'r1',
+    toDeviceId: 'sw2',
+    deviceProcessingId: 'sw2',
+    descriptionFr: 'Commutateur L2 distant (Switch SW-LAN2) : Commutation vers le port du serveur',
+    layerInspected: 2,
+    actionType: 'L2_COMMUTATION',
+    beforeHeaders: {
+      srcMac: 'AA:BB:CC:44:55:66',
+      dstMac: '70:85:C2:A1:B2:C3',
+      srcIp: '192.168.1.10',
+      dstIp: '198.51.100.25',
+      ttl: 63,
+      crc32: '0x8E192B4A',
+    },
+    afterHeaders: {
+      srcMac: 'AA:BB:CC:44:55:66 (Inchangé)',
+      dstMac: '70:85:C2:A1:B2:C3 (Inchangé)',
+      srcIp: '192.168.1.10 (Inchangé)',
+      dstIp: '198.51.100.25 (Inchangé)',
+      ttl: 63,
+      crc32: '0x8E192B4A',
+    },
+    explanationFr: [
+      'Le commutateur SW2 inspecte la MAC de destination 70:85:C2:A1:B2:C3.',
+      'Sa table CAM indique que cette adresse est connectée sur le port Fa0/24.',
+      'La trame est commutée directement vers le serveur sans aucune altération.',
+    ],
+  },
+  {
+    stepIndex: 5,
+    fromDeviceId: 'sw2',
+    toDeviceId: 'server1',
+    deviceProcessingId: 'server1',
+    descriptionFr: 'Serveur Web B : Désencapsulation complète L1 -> L7 et traitement applicatif',
+    layerInspected: 7,
+    actionType: 'RECEPTION',
+    beforeHeaders: {
+      srcMac: 'AA:BB:CC:44:55:66',
+      dstMac: '70:85:C2:A1:B2:C3',
+      srcIp: '192.168.1.10',
+      dstIp: '198.51.100.25',
+      ttl: 63,
+      crc32: '0x8E192B4A',
+    },
+    afterHeaders: {
+      srcMac: 'Traité L2 (FCS OK)',
+      dstMac: 'Traité L2 (MAC OK)',
+      srcIp: 'Traité L3 (IP OK)',
+      dstIp: 'Traité L3 (IP OK)',
+      ttl: 63,
+      crc32: 'Vérifié',
+    },
+    explanationFr: [
+      'Couche 1 : Conversion des signaux électriques en train binaire.',
+      'Couche 2 : Vérification du CRC32 FCS -> Intégrité validée, l’en-tête Ethernet est retiré.',
+      'Couche 3 : Vérification de l’IP destination 198.51.100.25 -> Correspond à la machine hôte. L’en-tête IP est retiré.',
+      'Couche 4 : Vérification du port destination 80 (HTTP) -> Segment TCP remis au démon serveur web.',
+      'Couche 7 : Le serveur HTTP Nginx/Apache lit la requête "GET /index.html" et prépare la réponse HTTP 200 OK !',
+    ],
+  },
+];

@@ -1,0 +1,6 @@
+{
+  "name": "Simulateur Pile Réseau & Modèle OSI",
+  "description": "Visualisateur interactif de la pile réseau OSI / TCP-IP : encapsulation, en-têtes, CRC32, bits de parité, périphériques L2/L3 et calcul des débits réels et utiles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
