@@ -33,6 +33,14 @@ export const APP_ROUTES: RouteItem[] = [
     badge: 'Interactif',
   },
   {
+    id: 'fragmentation',
+    label: 'Fragmentation & Réassemblage IP (MTU)',
+    shortLabel: 'Fragmentation IP (MTU)',
+    iconName: 'Scissors',
+    description: 'Découpe des paquets IP par goulet MTU, drapeaux DF/MF, calcul d’offsets sur 8 octets, PMTUD et réassemblage hôte.',
+    badge: 'RFC 791',
+  },
+  {
     id: 'osi',
     label: 'Modèle OSI & Encapsulation',
     shortLabel: 'OSI & PDU',

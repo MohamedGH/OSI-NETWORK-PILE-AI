@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   BookOpen,
   Zap,
+  Scissors,
   Menu,
   X,
   RotateCcw,
@@ -33,6 +34,7 @@ export const HeaderNav: React.FC = () => {
     dispatch({ type: 'RESET_JOURNEY' });
     dispatch({ type: 'RESET_STACK_JOURNEY' });
     dispatch({ type: 'RESET_TCP_ENGINE' });
+    dispatch({ type: 'RESET_FRAG_ALL' });
     notify('Simulateur réinitialisé aux paramètres par défaut', 'info');
   };
 
@@ -42,6 +44,8 @@ export const HeaderNav: React.FC = () => {
         return <Workflow className="w-4 h-4 text-cyan-400" />;
       case 'Zap':
         return <Zap className="w-4 h-4 text-amber-400" />;
+      case 'Scissors':
+        return <Scissors className="w-4 h-4 text-pink-400" />;
       case 'Layers':
         return <Layers className="w-4 h-4" />;
       case 'Network':

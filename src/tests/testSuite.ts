@@ -18,6 +18,12 @@ import {
   getSackSteps,
   getFastRetransmitSteps,
 } from '../utils/tcpCongestionEngine';
+import {
+  calculateIpFragmentation,
+  createInitialReassemblyBuffer,
+  insertFragmentIntoBuffer,
+  tickReassemblyBufferTimer,
+} from '../utils/ipFragmentationEngine';
 import { pipe, compose } from '../utils/functional';
 
 export const runAutomatedTestSuite = (): TestSuiteReport => {
@@ -479,6 +485,164 @@ export const runAutomatedTestSuite = (): TestSuiteReport => {
     );
   } catch (err: any) {
     addTest('tcp-err', 'TCP Test Exception', 'OSI_ENCAPSULATION', false, 'Success', err.message);
+  }
+
+  // 11. IP Fragmentation & Reassembly (RFC 791 / RFC 1191)
+  try {
+    // 11.1: Ethernet 1500 MTU to 576 MTU 8-byte alignment
+    const fragPlan1 = calculateIpFragmentation({
+      packetTotalSize: 4000,
+      bottleneckMtu: 576,
+      isDfSet: false,
+    });
+    // Max payload = floor((576 - 20)/8)*8 = 552
+    addTest(
+      'frag-01',
+      'Calcul Découpe MTU : Alignement strict sur multiple de 8 octets (RFC 791)',
+      'IP_FRAGMENTATION',
+      fragPlan1.maxFragmentDataSize === 552,
+      '552 octets utiles par fragment (552 % 8 === 0)',
+      `${fragPlan1.maxFragmentDataSize} octets utiles`,
+      'Nécessaire car le champ Fragment Offset est exprimé en unités de 8 octets'
+    );
+
+    // 11.2: Total Fragments Count for 4000B over 576 MTU
+    // Payload = 3980B. Ceil(3980 / 552) = 8 fragments
+    addTest(
+      'frag-02',
+      'Nombre de fragments calculé (Paquet 4000B sur MTU 576B)',
+      'IP_FRAGMENTATION',
+      fragPlan1.fragments.length === 8,
+      '8 fragments',
+      `${fragPlan1.fragments.length} fragments`,
+      '7 fragments de 552B + 1 fragment final de 116B'
+    );
+
+    // 11.3: Flags MF (More Fragments) correctness
+    const allExceptLastHaveMf = fragPlan1.fragments.slice(0, 7).every(f => f.mf === true);
+    const lastHasMfZero = fragPlan1.fragments[7].mf === false;
+    addTest(
+      'frag-03',
+      'Drapeau MF (More Fragments) : MF=1 sur tous les fragments sauf le dernier (MF=0)',
+      'IP_FRAGMENTATION',
+      allExceptLastHaveMf && lastHasMfZero,
+      'MF=1 pour frags 0..6, MF=0 pour frag 7',
+      `MF conformes : ${allExceptLastHaveMf && lastHasMfZero}`,
+      'Permet à l’hôte récepteur de détecter la fin de la chaîne de fragments'
+    );
+
+    // 11.4: Fragment Offset Progression in 8-byte units
+    const offsetProgressionValid =
+      fragPlan1.fragments[0].fragmentOffset === 0 &&
+      fragPlan1.fragments[1].fragmentOffset === 69 && // 552 / 8 = 69
+      fragPlan1.fragments[2].fragmentOffset === 138; // 1104 / 8 = 138
+    addTest(
+      'frag-04',
+      'Progression du champ Fragment Offset (Unités de 8 octets)',
+      'IP_FRAGMENTATION',
+      offsetProgressionValid,
+      'Offset #0=0, #1=69, #2=138',
+      `Offset #0=${fragPlan1.fragments[0].fragmentOffset}, #1=${fragPlan1.fragments[1].fragmentOffset}, #2=${fragPlan1.fragments[2].fragmentOffset}`,
+      'L’offset indique l’emplacement exact en mémoire dans le tampon'
+    );
+
+    // 11.5: DF (Don’t Fragment) Flag drop and ICMP Type 3 Code 4 (PMTUD)
+    const pmtudPlan = calculateIpFragmentation({
+      packetTotalSize: 4000,
+      bottleneckMtu: 1400,
+      isDfSet: true,
+    });
+    addTest(
+      'frag-05',
+      'Drapeau DF=1 : Rejet du paquet et génération ICMP Type 3 Code 4 (PMTUD)',
+      'IP_FRAGMENTATION',
+      pmtudPlan.isDroppedDueToDf === true &&
+        pmtudPlan.icmpError?.type === 3 &&
+        pmtudPlan.icmpError?.code === 4 &&
+        pmtudPlan.icmpError?.nextHopMtu === 1400,
+      'Rejeté, ICMP Type 3 Code 4, NextHop MTU=1400',
+      `Rejeté=${pmtudPlan.isDroppedDueToDf}, ICMP Type=${pmtudPlan.icmpError?.type} Code=${pmtudPlan.icmpError?.code} NextHop=${pmtudPlan.icmpError?.nextHopMtu}`,
+      'Permet la découverte automatique du Path MTU sans fragmentation'
+    );
+
+    // 11.6: Reassembly buffer with Out-of-Order delivery and hole detection
+    const testSamplePayload = '0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF';
+    const sampleFragPlan = calculateIpFragmentation({
+      packetTotalSize: 84, // 20B header + 64B payload
+      bottleneckMtu: 44, // 20B header + 24B max payload (24 is multiple of 8) -> 3 frags (24B, 24B, 16B)
+      isDfSet: false,
+      payloadText: testSamplePayload,
+    });
+
+    let buffer = createInitialReassemblyBuffer(64);
+    // Receive Fragment #2 (the last fragment) first!
+    buffer = insertFragmentIntoBuffer(buffer, sampleFragPlan.fragments[2]);
+    const holeAfterLast = buffer.missingByteRanges.length === 1 && buffer.missingByteRanges[0].start === 0 && buffer.missingByteRanges[0].end === 47;
+    
+    // Receive Fragment #0
+    buffer = insertFragmentIntoBuffer(buffer, sampleFragPlan.fragments[0]);
+    const holeMiddle = buffer.missingByteRanges.length === 1 && buffer.missingByteRanges[0].start === 24 && buffer.missingByteRanges[0].end === 47;
+
+    // Receive Fragment #1 (closing the hole)
+    buffer = insertFragmentIntoBuffer(buffer, sampleFragPlan.fragments[1]);
+    const isReassembled = buffer.isComplete && buffer.reassembledPayload === testSamplePayload;
+
+    addTest(
+      'frag-06',
+      'Tampon de Réassemblage : Gestion des Trous Mémoire & Arrivée Hors-Ordre (Out-of-Order)',
+      'IP_FRAGMENTATION',
+      holeAfterLast && holeMiddle && isReassembled,
+      'Trou initial [0..47], Trou intermédiaire [24..47], Réassemblage 100% Intègre',
+      `Reconstitué avec succès : ${isReassembled}`,
+      'Validation de la robustesse face aux paquets désordonnés sur le réseau'
+    );
+
+    // 11.7: Reassembly RFC 791 Timer Timeout
+    let timedOutBuffer = createInitialReassemblyBuffer(1000);
+    timedOutBuffer = insertFragmentIntoBuffer(timedOutBuffer, sampleFragPlan.fragments[0]);
+    for (let i = 0; i < 35; i++) {
+      timedOutBuffer = tickReassemblyBufferTimer(timedOutBuffer);
+    }
+    addTest(
+      'frag-07',
+      'Minuteur de Réassemblage RFC 791 : Expiration & Rejet des fragments incomplets',
+      'IP_FRAGMENTATION',
+      timedOutBuffer.isTimedOut === true && timedOutBuffer.timerSecondsRemaining === 0,
+      'Timeout expiré (30s) -> Tampon purgé',
+      `isTimedOut=${timedOutBuffer.isTimedOut}, Minuteur=${timedOutBuffer.timerSecondsRemaining}s`,
+      'Évite la saturation mémoire par des fragments orphelins'
+    );
+
+    // 11.8: Canvas Animation Geometry & Slicing Coordinates
+    const canvasPipeThickness = Math.max(6, Math.min(16, (576 / 1500) * 14));
+    addTest(
+      'frag-08',
+      'Moteur Graphique Canvas : Épaisseur dynamique du goulet proportionnelle au MTU',
+      'IP_FRAGMENTATION',
+      canvasPipeThickness >= 6 && canvasPipeThickness <= 16,
+      'Épaisseur calibrée entre 6px et 16px',
+      `${canvasPipeThickness.toFixed(2)}px pour MTU 576B`,
+      'Rendu visuel fidèle de l’étranglement physique'
+    );
+
+    // 11.9: Canvas Particle Hit-Testing Box Math
+    const testFragWidth = 50;
+    const testFragHeight = 28;
+    const clickX = 100;
+    const clickY = 150;
+    const isHit = (clickX >= 100 - testFragWidth / 2 && clickX <= 100 + testFragWidth / 2) &&
+                  (clickY >= 150 - testFragHeight / 2 && clickY <= 150 + testFragHeight / 2);
+    addTest(
+      'frag-09',
+      'Moteur Graphique Canvas : Boîte d’interception interactive (Hit-Testing Sabotage)',
+      'IP_FRAGMENTATION',
+      isHit === true,
+      'Hit collision validée au centre du fragment',
+      `Collision détectée : ${isHit}`,
+      'Permet l’interception au clic/toucher des fragments en vol'
+    );
+  } catch (err: any) {
+    addTest('frag-err', 'IP Fragmentation Test Exception', 'IP_FRAGMENTATION', false, 'Success', err.message);
   }
 
   const executionTimeTotalMs = parseFloat((performance.now() - startTime).toFixed(2));

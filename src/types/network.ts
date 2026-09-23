@@ -245,7 +245,66 @@ export interface Crc32Result {
 }
 
 // Route Type
-export type AppRoute = 'osi' | 'stack-journey' | 'tcp-engine' | 'journey' | 'bandwidth' | 'errors' | 'tests' | 'glossary';
+export type AppRoute = 'osi' | 'stack-journey' | 'tcp-engine' | 'fragmentation' | 'journey' | 'bandwidth' | 'errors' | 'tests' | 'glossary';
+
+// IP Fragmentation & Reassembly Types (RFC 791 / RFC 1191)
+export interface IpFragment {
+  readonly fragmentIndex: number;
+  readonly totalFragments: number;
+  readonly identification: number;
+  readonly totalLength: number; // Header (20B) + fragment payload
+  readonly headerLength: number; // typically 20B
+  readonly payloadLength: number; // bytes in this fragment
+  readonly df: boolean; // Don't Fragment flag (0 or 1)
+  readonly mf: boolean; // More Fragments flag (1 except last)
+  readonly fragmentOffset: number; // In 8-byte units (e.g., 0, 185, 370)
+  readonly byteRangeStart: number; // In raw payload bytes (e.g. 0, 1480)
+  readonly byteRangeEnd: number; // In raw payload bytes (e.g. 1479, 2959)
+  readonly payloadText: string;
+  readonly ttl: number;
+  readonly protocol: 'TCP' | 'UDP' | 'ICMP';
+  readonly sourceIp: string;
+  readonly destinationIp: string;
+  readonly status: 'PENDING' | 'IN_FLIGHT' | 'RECEIVED' | 'CORRUPTED' | 'DROPPED';
+  readonly arrivalOrder?: number;
+}
+
+export interface IcmpFragNeededMessage {
+  readonly type: number; // 3 = Destination Unreachable
+  readonly code: number; // 4 = Fragmentation Needed and DF was Set
+  readonly nextHopMtu: number;
+  readonly routerIp: string;
+  readonly description: string;
+  readonly pmtudSuggestedMtu: number;
+}
+
+export interface IpFragmentationPlan {
+  readonly originalPacketSize: number; // IP total length (e.g. 4000B)
+  readonly originalPayloadSize: number; // e.g. 3980B
+  readonly ingressMtu: number; // e.g. 1500B
+  readonly bottleneckMtu: number; // e.g. 576B, 1000B
+  readonly identification: number;
+  readonly isDfSet: boolean;
+  readonly isDroppedDueToDf: boolean;
+  readonly maxFragmentDataSize: number; // (bottleneckMtu - 20) rounded down to mult of 8
+  readonly fragments: IpFragment[];
+  readonly totalFragmentsCount: number;
+  readonly totalOverheadBytes: number;
+  readonly efficiencyPercentage: number;
+  readonly icmpError?: IcmpFragNeededMessage;
+}
+
+export interface ReassemblyBufferState {
+  readonly expectedTotalPayloadBytes: number;
+  readonly receivedPayloadBytes: number;
+  readonly receivedFragments: IpFragment[];
+  readonly missingByteRanges: Array<{ start: number; end: number }>;
+  readonly isComplete: boolean;
+  readonly isTimedOut: boolean;
+  readonly reassembledPayload: string | null;
+  readonly timerSecondsRemaining: number;
+  readonly logMessages: string[];
+}
 
 // TCP Congestion & Reliability Types
 export type TcpAlgorithm = 'RENO' | 'TAHOE' | 'CUBIC' | 'BBR';
@@ -339,7 +398,7 @@ export interface StackToStackStep {
 export interface TestCaseResult {
   readonly id: string;
   readonly name: string;
-  readonly category: 'OSI_ENCAPSULATION' | 'CRC32_PARITY' | 'L2_SWITCH' | 'L3_ROUTING' | 'BANDWIDTH_MATH' | 'UNITS_CONVERSION';
+  readonly category: 'OSI_ENCAPSULATION' | 'CRC32_PARITY' | 'L2_SWITCH' | 'L3_ROUTING' | 'BANDWIDTH_MATH' | 'UNITS_CONVERSION' | 'IP_FRAGMENTATION';
   readonly passed: boolean;
   readonly expected: string;
   readonly actual: string;

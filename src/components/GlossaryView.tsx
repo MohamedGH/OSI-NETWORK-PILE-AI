@@ -99,6 +99,28 @@ export const GlossaryView: React.FC = () => {
         },
       ],
     },
+    {
+      title: '5. Fragmentation IP & Découverte PMTUD (RFC 791 / RFC 1191)',
+      icon: <Layers className="w-4 h-4 text-pink-400" />,
+      items: [
+        {
+          term: 'Fragment Offset (Décalage de Fragment)',
+          def: 'Champ de 13 bits indiquant la position des données dans le datagramme initial, mesurée en unités de 8 octets (64 bits). Tout fragment intermédiaire doit obligatoirement avoir une charge utile multiple de 8 octets.',
+        },
+        {
+          term: 'Drapeaux DF (Don’t Fragment) et MF (More Fragments)',
+          def: 'DF=1 interdit aux routeurs de fragmenter le paquet (déclenche un rejet ICMP 3/4). MF=1 indique que d’autres fragments suivent ; le dernier fragment porte MF=0.',
+        },
+        {
+          term: 'Path MTU Discovery (PMTUD - RFC 1191)',
+          def: 'Technique où l’émetteur émet des paquets avec DF=1 afin de sonder le plus petit MTU sur tout le trajet via les réponses d’erreur ICMP Type 3 Code 4 (Fragmentation Needed) des routeurs.',
+        },
+        {
+          term: 'Tampon de Réassemblage & Minuteur RFC 791',
+          def: 'L’hôte récepteur rassemble les fragments par (Source, Destination, Protocole, Identification). Si tous les trous ne sont pas comblés avant l’expiration du minuteur (30s à 60s), tous les fragments sont purgés.',
+        },
+      ],
+    },
   ];
 
   return (

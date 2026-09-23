@@ -15,6 +15,7 @@ import {
   Gauge,
   ShieldAlert,
   Search,
+  Scissors,
 } from 'lucide-react';
 import { useNetworkStore } from '../store/stateManager';
 import { useErrorManager } from '../errors/errorManager';
@@ -35,8 +36,9 @@ export const TestSuiteView: React.FC = () => {
 
   const categories = [
     { id: 'ALL', label: 'Tous les tests' },
+    { id: 'IP_FRAGMENTATION', label: 'Fragmentation IP (MTU)' },
     { id: 'CRC32_PARITY', label: 'CRC32 & Parité' },
-    { id: 'OSI_ENCAPSULATION', label: 'Encapsulation OSI' },
+    { id: 'OSI_ENCAPSULATION', label: 'Encapsulation OSI & TCP' },
     { id: 'L2_SWITCH', label: 'Commutateur L2' },
     { id: 'L3_ROUTING', label: 'Routeur L3' },
     { id: 'BANDWIDTH_MATH', label: 'Calcul Débits' },
@@ -54,6 +56,8 @@ export const TestSuiteView: React.FC = () => {
 
   const getCategoryIcon = (cat: TestCaseResult['category']) => {
     switch (cat) {
+      case 'IP_FRAGMENTATION':
+        return <Scissors className="w-3.5 h-3.5 text-pink-400" />;
       case 'CRC32_PARITY':
         return <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />;
       case 'OSI_ENCAPSULATION':

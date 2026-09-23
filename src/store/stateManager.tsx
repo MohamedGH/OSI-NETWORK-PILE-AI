@@ -13,6 +13,9 @@ import {
   TestSuiteReport,
   TcpAlgorithm,
   TcpScenarioTab,
+  IpFragmentationPlan,
+  ReassemblyBufferState,
+  IpFragment,
 } from '../types/network';
 import { createDefaultPacketOptions, buildEncapsulatedPacket } from '../utils/packetPipeline';
 import { calculateBandwidthMetrics } from '../utils/networkCalculations';
@@ -24,6 +27,16 @@ import {
   stepTcpTripleDupAck,
   stepTcpTimeoutRto,
 } from '../utils/tcpCongestionEngine';
+import {
+  FragmentationInputOptions,
+  calculateIpFragmentation,
+  createInitialReassemblyBuffer,
+  insertFragmentIntoBuffer,
+  tickReassemblyBufferTimer,
+  FRAGMENTATION_PRESET_SCENARIOS,
+} from '../utils/ipFragmentationEngine';
+
+export type FragTab = 'SPLITTER' | 'REASSEMBLY' | 'PMTUD' | 'COMPARISON';
 
 export interface NetworkState {
   // OSI & Packet Pipeline
@@ -43,6 +56,13 @@ export interface NetworkState {
   readonly isTcpEnginePlaying: boolean;
   readonly activeTcpTab: TcpScenarioTab;
   readonly activeTcpScenarioStep: number;
+
+  // IP Fragmentation & Reassembly Engine (RFC 791 / RFC 1191)
+  readonly fragOptions: FragmentationInputOptions;
+  readonly fragPlan: IpFragmentationPlan;
+  readonly reassemblyBuffer: ReassemblyBufferState;
+  readonly activeFragTab: FragTab;
+  readonly isFragAutoPlaying: boolean;
 
   // Network Journey (L2/L3 Hops)
   readonly activeJourneyStep: number;
@@ -90,6 +110,17 @@ export type NetworkAction =
   | { type: 'NEXT_TCP_SCENARIO_STEP'; payload: number } // max steps
   | { type: 'PREV_TCP_SCENARIO_STEP'; payload: number }
 
+  // IP Fragmentation Actions
+  | { type: 'UPDATE_FRAG_OPTIONS'; payload: Partial<FragmentationInputOptions> }
+  | { type: 'SET_FRAG_TAB'; payload: FragTab }
+  | { type: 'LOAD_FRAG_SCENARIO'; payload: string }
+  | { type: 'RECEIVE_NEXT_FRAGMENT' }
+  | { type: 'RECEIVE_FRAGMENT_BY_INDEX'; payload: number }
+  | { type: 'RESET_REASSEMBLY_BUFFER' }
+  | { type: 'SET_FRAG_AUTO_PLAY'; payload: boolean }
+  | { type: 'TICK_REASSEMBLY_TIMER' }
+  | { type: 'RESET_FRAG_ALL' }
+
   // Journey Actions
   | { type: 'SET_JOURNEY_STEP'; payload: number }
   | { type: 'SET_JOURNEY_PLAYING'; payload: boolean }
@@ -127,6 +158,22 @@ const initialBandwidthParams: BandwidthCalculationParams = {
 const initialBandwidthResult = calculateBandwidthMetrics(initialBandwidthParams);
 const initialTestReport = runAutomatedTestSuite();
 
+const initialFragOptions: FragmentationInputOptions = {
+  packetTotalSize: 4000,
+  bottleneckMtu: 1500,
+  ingressMtu: 1500,
+  isDfSet: false,
+  identification: 0x4a2f,
+  payloadText: 'DATA_STREAM_PAYLOAD_CHUNK_HTTP_REQUEST_4000_BYTES_FOR_IP_FRAGMENTATION_TEST_AND_DEMONSTRATION',
+  sourceIp: '192.168.1.100',
+  destinationIp: '198.51.100.25',
+  protocol: 'TCP',
+  ttl: 64,
+};
+
+const initialFragPlan = calculateIpFragmentation(initialFragOptions);
+const initialReassemblyBuffer = createInitialReassemblyBuffer(initialFragPlan.originalPayloadSize);
+
 const initialNetworkState: NetworkState = {
   packetOptions: initialDefaultOptions,
   encapsulatedPacket: initialPacket,
@@ -142,6 +189,12 @@ const initialNetworkState: NetworkState = {
   isTcpEnginePlaying: false,
   activeTcpTab: 'CONGESTION_GRAPH',
   activeTcpScenarioStep: 1,
+
+  fragOptions: initialFragOptions,
+  fragPlan: initialFragPlan,
+  reassemblyBuffer: initialReassemblyBuffer,
+  activeFragTab: 'SPLITTER',
+  isFragAutoPlaying: false,
 
   activeJourneyStep: 1,
   isJourneyPlaying: false,
@@ -358,6 +411,112 @@ export const networkReducer = (state: NetworkState, action: NetworkAction): Netw
           state.activeTcpScenarioStep > 1 ? state.activeTcpScenarioStep - 1 : action.payload,
       };
 
+    // IP Fragmentation & Reassembly Actions
+    case 'UPDATE_FRAG_OPTIONS': {
+      const updatedOpts: FragmentationInputOptions = {
+        ...state.fragOptions,
+        ...action.payload,
+      };
+      const updatedPlan = calculateIpFragmentation(updatedOpts);
+      const updatedBuffer = createInitialReassemblyBuffer(updatedPlan.originalPayloadSize);
+      return {
+        ...state,
+        fragOptions: updatedOpts,
+        fragPlan: updatedPlan,
+        reassemblyBuffer: updatedBuffer,
+        isFragAutoPlaying: false,
+      };
+    }
+
+    case 'SET_FRAG_TAB':
+      return {
+        ...state,
+        activeFragTab: action.payload,
+      };
+
+    case 'LOAD_FRAG_SCENARIO': {
+      const foundPreset = FRAGMENTATION_PRESET_SCENARIOS.find(p => p.id === action.payload);
+      if (!foundPreset) return state;
+
+      const newOpts: FragmentationInputOptions = {
+        ...state.fragOptions,
+        packetTotalSize: foundPreset.packetTotalSize,
+        bottleneckMtu: foundPreset.bottleneckMtu,
+        isDfSet: foundPreset.isDfSet,
+        payloadText: foundPreset.payloadSample,
+      };
+      const newPlan = calculateIpFragmentation(newOpts);
+      const newBuffer = createInitialReassemblyBuffer(newPlan.originalPayloadSize);
+
+      return {
+        ...state,
+        fragOptions: newOpts,
+        fragPlan: newPlan,
+        reassemblyBuffer: newBuffer,
+        isFragAutoPlaying: false,
+      };
+    }
+
+    case 'RECEIVE_NEXT_FRAGMENT': {
+      if (state.fragPlan.fragments.length === 0 || state.reassemblyBuffer.isComplete) {
+        return state;
+      }
+      // Find the first fragment not yet in buffer
+      const nextFrag = state.fragPlan.fragments.find(
+        f => !state.reassemblyBuffer.receivedFragments.some(rf => rf.fragmentIndex === f.fragmentIndex)
+      );
+      if (!nextFrag) return state;
+
+      const newBuffer = insertFragmentIntoBuffer(state.reassemblyBuffer, nextFrag);
+      return {
+        ...state,
+        reassemblyBuffer: newBuffer,
+      };
+    }
+
+    case 'RECEIVE_FRAGMENT_BY_INDEX': {
+      const targetFrag = state.fragPlan.fragments.find(f => f.fragmentIndex === action.payload);
+      if (!targetFrag) return state;
+      const newBuffer = insertFragmentIntoBuffer(state.reassemblyBuffer, targetFrag);
+      return {
+        ...state,
+        reassemblyBuffer: newBuffer,
+      };
+    }
+
+    case 'RESET_REASSEMBLY_BUFFER': {
+      const resetBuffer = createInitialReassemblyBuffer(state.fragPlan.originalPayloadSize);
+      return {
+        ...state,
+        reassemblyBuffer: resetBuffer,
+        isFragAutoPlaying: false,
+      };
+    }
+
+    case 'SET_FRAG_AUTO_PLAY':
+      return {
+        ...state,
+        isFragAutoPlaying: action.payload,
+      };
+
+    case 'TICK_REASSEMBLY_TIMER':
+      return {
+        ...state,
+        reassemblyBuffer: tickReassemblyBufferTimer(state.reassemblyBuffer),
+      };
+
+    case 'RESET_FRAG_ALL': {
+      const resetPlan = calculateIpFragmentation(initialFragOptions);
+      return {
+        ...state,
+        fragOptions: initialFragOptions,
+        fragPlan: resetPlan,
+        reassemblyBuffer: createInitialReassemblyBuffer(resetPlan.originalPayloadSize),
+        activeFragTab: 'SPLITTER',
+        isFragAutoPlaying: false,
+      };
+    }
+
     // Journey Actions
     case 'SET_JOURNEY_STEP':
       return {
@@ -494,6 +653,38 @@ export const NetworkStoreProvider: React.FC<{ children: ReactNode }> = ({ childr
     }, 1800);
     return () => clearInterval(interval);
   }, [state.isTcpEnginePlaying]);
+
+  // Auto-play timer for IP Fragment Reassembly
+  useEffect(() => {
+    if (!state.isFragAutoPlaying) return;
+    const interval = setInterval(() => {
+      if (state.reassemblyBuffer.isComplete || state.reassemblyBuffer.isTimedOut) {
+        dispatch({ type: 'SET_FRAG_AUTO_PLAY', payload: false });
+        return;
+      }
+      dispatch({ type: 'RECEIVE_NEXT_FRAGMENT' });
+    }, 1400);
+    return () => clearInterval(interval);
+  }, [state.isFragAutoPlaying, state.reassemblyBuffer.isComplete, state.reassemblyBuffer.isTimedOut]);
+
+  // Reassembly buffer 1-second RFC 791 timer countdown
+  useEffect(() => {
+    if (
+      state.reassemblyBuffer.isComplete ||
+      state.reassemblyBuffer.isTimedOut ||
+      state.reassemblyBuffer.receivedFragments.length === 0
+    ) {
+      return;
+    }
+    const timerInterval = setInterval(() => {
+      dispatch({ type: 'TICK_REASSEMBLY_TIMER' });
+    }, 1000);
+    return () => clearInterval(timerInterval);
+  }, [
+    state.reassemblyBuffer.isComplete,
+    state.reassemblyBuffer.isTimedOut,
+    state.reassemblyBuffer.receivedFragments.length,
+  ]);
 
   return (
     <NetworkStoreContext.Provider value={{ state, dispatch }}>

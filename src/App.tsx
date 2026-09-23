@@ -9,13 +9,14 @@ import { NetworkStoreProvider } from './store/stateManager';
 import { HeaderNav } from './components/HeaderNav';
 import { StackToStackJourneyView } from './components/StackToStackJourneyView';
 import { TcpCongestionView } from './components/TcpCongestionView';
+import { IpFragmentationView } from './components/IpFragmentationView';
 import { OsiVisualizerView } from './components/OsiVisualizerView';
 import { NetworkJourneyView } from './components/NetworkJourneyView';
 import { BandwidthCalculatorView } from './components/BandwidthCalculatorView';
 import { ErrorDetectionSandboxView } from './components/ErrorDetectionSandboxView';
 import { TestSuiteView } from './components/TestSuiteView';
 import { GlossaryView } from './components/GlossaryView';
-import { Layers, Network, Gauge, ShieldAlert, CheckCircle2, BookOpen, Workflow, Zap } from 'lucide-react';
+import { Layers, Network, Gauge, ShieldAlert, CheckCircle2, BookOpen, Workflow, Zap, Scissors } from 'lucide-react';
 
 const MainViewContent: React.FC = () => {
   const { currentRoute } = useRouteManager();
@@ -25,6 +26,8 @@ const MainViewContent: React.FC = () => {
       return <StackToStackJourneyView />;
     case 'tcp-engine':
       return <TcpCongestionView />;
+    case 'fragmentation':
+      return <IpFragmentationView />;
     case 'osi':
       return <OsiVisualizerView />;
     case 'journey':
