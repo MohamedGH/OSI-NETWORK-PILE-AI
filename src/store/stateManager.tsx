@@ -1,5 +1,7 @@
 /**
- * Network Simulator Central State Manager (Pure Functional State & Reducer)
+ * Central Functional State Manager (Reducer + Context Provider)
+ * Manages TCP CUBIC/Reno/Tahoe/BBR, Sliding Window, CRC32 & Parity Sandbox,
+ * Intra-Town & Inter-City Transit, IPv4 Fragmentation, OSI Stack, and Automated Tests.
  */
 
 import React, { createContext, useContext, useReducer, useEffect, ReactNode } from 'react';
@@ -15,14 +17,15 @@ import {
   TcpScenarioTab,
   IpFragmentationPlan,
   ReassemblyBufferState,
-  IpFragment,
+  TownIncidentType,
+  TownPacketType,
+  TownFlightPacket,
+  TownSimulationMetrics,
+  TownSimulationScope,
 } from '../types/network';
-import { createDefaultPacketOptions, buildEncapsulatedPacket } from '../utils/packetPipeline';
-import { calculateBandwidthMetrics } from '../utils/networkCalculations';
-import { runAutomatedTestSuite } from '../tests/testSuite';
 import {
   TcpEngineState,
-  INITIAL_TCP_STATE,
+  createInitialTcpState,
   stepTcpNormalAck,
   stepTcpTripleDupAck,
   stepTcpTimeoutRto,
@@ -33,574 +36,408 @@ import {
   createInitialReassemblyBuffer,
   insertFragmentIntoBuffer,
   tickReassemblyBufferTimer,
-  FRAGMENTATION_PRESET_SCENARIOS,
 } from '../utils/ipFragmentationEngine';
-
-export type FragTab = 'SPLITTER' | 'REASSEMBLY' | 'PMTUD' | 'COMPARISON';
+import {
+  computeActiveTownPath,
+  calculateTownPathMetrics,
+  createFlightPacket,
+  stepTownPackets,
+} from '../utils/townJourneyEngine';
+import {
+  createDefaultPacketOptions,
+  buildEncapsulatedPacket,
+  calculateBandwidthMetrics,
+} from '../utils/packetPipeline';
+import { runAutomatedTestSuite } from '../tests/testSuite';
 
 export interface NetworkState {
-  // OSI & Packet Pipeline
-  readonly packetOptions: PacketBuilderOptions;
-  readonly encapsulatedPacket: EncapsulatedPacket;
-  readonly inspectedOsiLayer: OsiLayerNumber;
-  readonly isEncapsulationDirection: boolean; // true = L7 -> L1, false = L1 -> L7
-  readonly isOsiPlaying: boolean;
-
-  // Stack-to-Stack Full Journey (Host A Stack -> Network Wire -> Host B Stack)
-  readonly stackJourneyStep: number; // 1 to 10
-  readonly isStackJourneyPlaying: boolean;
-  readonly stackJourneySpeed: number; // 0.5, 1, 1.5, 2
-
-  // TCP Congestion, Flow Control & Reliability Engine
+  // 1. TCP Congestion (CUBIC, Reno, Tahoe, BBR) & Sliding Window
   readonly tcpEngine: TcpEngineState;
-  readonly isTcpEnginePlaying: boolean;
+  readonly isTcpPlaying: boolean;
   readonly activeTcpTab: TcpScenarioTab;
-  readonly activeTcpScenarioStep: number;
+  readonly activeSackStep: number;
 
-  // IP Fragmentation & Reassembly Engine (RFC 791 / RFC 1191)
+  // 2. CRC32 & Parity Error Detection Sandbox
+  readonly errorInputAscii: string;
+  readonly errorParityType: ParityType;
+  readonly errorFlippedBits: number[];
+
+  // 3. Intra-Town & Inter-City (Inter-Ville) Transit
+  readonly townScope: TownSimulationScope;
+  readonly townIncident: TownIncidentType;
+  readonly townPacketType: TownPacketType;
+  readonly isTownPlaying: boolean;
+  readonly townSpeedMultiplier: number;
+  readonly selectedTownNodeId: string;
+  readonly selectedInterCityNodeId: string;
+  readonly showSubterraneanCutaway: boolean;
+  readonly townFlightPackets: TownFlightPacket[];
+  readonly townMetrics: TownSimulationMetrics;
+
+  // 4. IPv4 Fragmentation & Reassembly (MTU / PMTUD)
   readonly fragOptions: FragmentationInputOptions;
   readonly fragPlan: IpFragmentationPlan;
   readonly reassemblyBuffer: ReassemblyBufferState;
-  readonly activeFragTab: FragTab;
   readonly isFragAutoPlaying: boolean;
 
-  // Network Journey (L2/L3 Hops)
-  readonly activeJourneyStep: number;
-  readonly isJourneyPlaying: boolean;
-
-  // Bandwidth & Throughput Simulator
+  // 5. OSI Stack & Bandwidth / Goodput
+  readonly packetOptions: PacketBuilderOptions;
+  readonly encapsulatedPacket: EncapsulatedPacket;
+  readonly inspectedOsiLayer: OsiLayerNumber;
   readonly bandwidthParams: BandwidthCalculationParams;
   readonly bandwidthResult: BandwidthCalculationResult;
 
-  // Error Detection Sandbox
-  readonly errorSandboxInput: string;
-  readonly errorSandboxParityType: ParityType;
-  readonly errorSandboxFlippedBits: number[];
-
-  // Tests
+  // 6. Automated Unit Tests
   readonly testReport: TestSuiteReport;
 }
 
 export type NetworkAction =
-  | { type: 'UPDATE_PACKET_OPTIONS'; payload: Partial<PacketBuilderOptions> }
-  | { type: 'SET_INSPECTED_LAYER'; payload: OsiLayerNumber }
-  | { type: 'SET_ENCAPSULATION_DIRECTION'; payload: boolean }
-  | { type: 'SET_OSI_PLAYING'; payload: boolean }
-  | { type: 'STEP_OSI_LAYER' }
-  | { type: 'RESET_PACKET' }
-  
-  // Stack-to-Stack Journey Actions
-  | { type: 'SET_STACK_JOURNEY_STEP'; payload: number }
-  | { type: 'SET_STACK_JOURNEY_PLAYING'; payload: boolean }
-  | { type: 'SET_STACK_JOURNEY_SPEED'; payload: number }
-  | { type: 'NEXT_STACK_JOURNEY_STEP' }
-  | { type: 'PREV_STACK_JOURNEY_STEP' }
-  | { type: 'RESET_STACK_JOURNEY' }
-
-  // TCP Congestion Engine Actions
+  // TCP Actions
   | { type: 'SET_TCP_ALGO'; payload: TcpAlgorithm }
   | { type: 'STEP_TCP_ACK' }
-  | { type: 'INJECT_TCP_TRIPLE_DUP_ACK' }
-  | { type: 'INJECT_TCP_RTO_TIMEOUT' }
-  | { type: 'RESET_TCP_ENGINE' }
-  | { type: 'SET_TCP_ENGINE_PLAYING'; payload: boolean }
+  | { type: 'INJECT_TCP_DUP_ACK' }
+  | { type: 'INJECT_TCP_RTO' }
   | { type: 'SET_TCP_RWND'; payload: number }
+  | { type: 'SET_TCP_IN_FLIGHT'; payload: number }
   | { type: 'SET_TCP_TAB'; payload: TcpScenarioTab }
-  | { type: 'SET_TCP_SCENARIO_STEP'; payload: number }
-  | { type: 'NEXT_TCP_SCENARIO_STEP'; payload: number } // max steps
-  | { type: 'PREV_TCP_SCENARIO_STEP'; payload: number }
+  | { type: 'SET_TCP_PLAYING'; payload: boolean }
+  | { type: 'SET_SACK_STEP'; payload: number }
+  | { type: 'RESET_TCP_ENGINE' }
 
-  // IP Fragmentation Actions
-  | { type: 'UPDATE_FRAG_OPTIONS'; payload: Partial<FragmentationInputOptions> }
-  | { type: 'SET_FRAG_TAB'; payload: FragTab }
-  | { type: 'LOAD_FRAG_SCENARIO'; payload: string }
-  | { type: 'RECEIVE_NEXT_FRAGMENT' }
-  | { type: 'RECEIVE_FRAGMENT_BY_INDEX'; payload: number }
-  | { type: 'RESET_REASSEMBLY_BUFFER' }
-  | { type: 'SET_FRAG_AUTO_PLAY'; payload: boolean }
-  | { type: 'TICK_REASSEMBLY_TIMER' }
-  | { type: 'RESET_FRAG_ALL' }
-
-  // Journey Actions
-  | { type: 'SET_JOURNEY_STEP'; payload: number }
-  | { type: 'SET_JOURNEY_PLAYING'; payload: boolean }
-  | { type: 'NEXT_JOURNEY_STEP' }
-  | { type: 'PREV_JOURNEY_STEP' }
-  | { type: 'RESET_JOURNEY' }
-  
-  // Bandwidth Actions
-  | { type: 'UPDATE_BANDWIDTH_PARAMS'; payload: Partial<BandwidthCalculationParams> }
-  
-  // Error Sandbox Actions
+  // Error Detection Actions
   | { type: 'SET_ERROR_INPUT'; payload: string }
   | { type: 'SET_ERROR_PARITY_TYPE'; payload: ParityType }
   | { type: 'TOGGLE_FLIPPED_BIT'; payload: number }
   | { type: 'CLEAR_FLIPPED_BITS' }
-  
-  // Test Actions
-  | { type: 'RUN_TEST_SUITE' };
 
-const initialDefaultOptions = createDefaultPacketOptions();
-const initialPacket = buildEncapsulatedPacket(initialDefaultOptions, 7, true);
+  // Town & Inter-City Actions
+  | { type: 'SET_TOWN_SCOPE'; payload: TownSimulationScope }
+  | { type: 'SET_TOWN_INCIDENT'; payload: TownIncidentType }
+  | { type: 'SET_TOWN_PACKET_TYPE'; payload: TownPacketType }
+  | { type: 'SET_TOWN_PLAYING'; payload: boolean }
+  | { type: 'SET_TOWN_SPEED'; payload: number }
+  | { type: 'SELECT_TOWN_NODE'; payload: string }
+  | { type: 'SELECT_INTERCITY_NODE'; payload: string }
+  | { type: 'TOGGLE_SUBTERRANEAN_CUTAWAY' }
+  | { type: 'EMIT_TOWN_PACKET'; payload?: TownPacketType }
+  | { type: 'STEP_TOWN_SIMULATION' }
 
-const initialBandwidthParams: BandwidthCalculationParams = {
-  nominalBitrateMbps: 1000, // 1 Gbps
-  payloadSizeBytes: 1460, // Standard MSS
-  mtuBytes: 1500,
-  transportProtocol: 'TCP',
-  packetLossRatePercent: 0,
-  rttMs: 15,
-  windowSizeBytes: 65536,
-  enableJumboFrames: false,
-  useBinaryUnits: false,
-};
+  // IP Fragmentation Actions
+  | { type: 'UPDATE_FRAG_OPTIONS'; payload: Partial<FragmentationInputOptions> }
+  | { type: 'RECEIVE_FRAGMENT_BY_INDEX'; payload: number }
+  | { type: 'RECEIVE_NEXT_FRAGMENT' }
+  | { type: 'RESET_REASSEMBLY_BUFFER' }
+  | { type: 'SET_FRAG_AUTO_PLAY'; payload: boolean }
+  | { type: 'TICK_REASSEMBLY_TIMER' }
 
-const initialBandwidthResult = calculateBandwidthMetrics(initialBandwidthParams);
-const initialTestReport = runAutomatedTestSuite();
+  // OSI & Bandwidth Actions
+  | { type: 'UPDATE_PACKET_OPTIONS'; payload: Partial<PacketBuilderOptions> }
+  | { type: 'SET_INSPECTED_LAYER'; payload: OsiLayerNumber }
+  | { type: 'UPDATE_BANDWIDTH_PARAMS'; payload: Partial<BandwidthCalculationParams> }
 
-const initialFragOptions: FragmentationInputOptions = {
-  packetTotalSize: 4000,
-  bottleneckMtu: 1500,
-  ingressMtu: 1500,
-  isDfSet: false,
-  identification: 0x4a2f,
-  payloadText: 'DATA_STREAM_PAYLOAD_CHUNK_HTTP_REQUEST_4000_BYTES_FOR_IP_FRAGMENTATION_TEST_AND_DEMONSTRATION',
-  sourceIp: '192.168.1.100',
-  destinationIp: '198.51.100.25',
-  protocol: 'TCP',
-  ttl: 64,
-};
+  // Global & Test Actions
+  | { type: 'RUN_TEST_SUITE' }
+  | { type: 'RESET_ALL' };
 
-const initialFragPlan = calculateIpFragmentation(initialFragOptions);
-const initialReassemblyBuffer = createInitialReassemblyBuffer(initialFragPlan.originalPayloadSize);
+const createInitialState = (): NetworkState => {
+  const defaultPacketOpts = createDefaultPacketOptions();
+  const initialFragOpts: FragmentationInputOptions = {
+    packetTotalSize: 4000,
+    bottleneckMtu: 1500,
+    ingressMtu: 1500,
+    isDfSet: false,
+    identification: 0x4a2f,
+    payloadText: 'HTTP_PAYLOAD_STREAM_DATA_BLOCKS_FOR_IPV4_FRAGMENTATION_AND_REASSEMBLY_RFC791',
+    sourceIp: '192.168.1.100',
+    destinationIp: '198.51.100.25',
+    protocol: 'TCP',
+    ttl: 64,
+  };
+  const initialFragPlan = calculateIpFragmentation(initialFragOpts);
+  const initialReassembly = createInitialReassemblyBuffer(initialFragPlan.originalPayloadSize);
 
-const initialNetworkState: NetworkState = {
-  packetOptions: initialDefaultOptions,
-  encapsulatedPacket: initialPacket,
-  inspectedOsiLayer: 7,
-  isEncapsulationDirection: true,
-  isOsiPlaying: false,
+  const initialTownPath = computeActiveTownPath('INTRA_TOWN', 'NONE');
+  const initialTownCalc = calculateTownPathMetrics(initialTownPath.pathLinks, 'NONE', 540);
 
-  stackJourneyStep: 1,
-  isStackJourneyPlaying: false,
-  stackJourneySpeed: 1,
+  const initialBwParams: BandwidthCalculationParams = {
+    nominalBitrateMbps: 1000,
+    payloadSizeBytes: 1460,
+    mtuBytes: 1500,
+    transportProtocol: 'TCP',
+    packetLossRatePercent: 0,
+    rttMs: 16,
+    windowSizeBytes: 65536,
+    enableJumboFrames: false,
+  };
 
-  tcpEngine: INITIAL_TCP_STATE,
-  isTcpEnginePlaying: false,
-  activeTcpTab: 'CONGESTION_GRAPH',
-  activeTcpScenarioStep: 1,
+  // Pre-step CUBIC a few RTTs so the chart has rich initial data on first load
+  let initialTcp = createInitialTcpState('CUBIC');
+  for (let i = 0; i < 6; i++) {
+    initialTcp = stepTcpNormalAck(initialTcp);
+  }
 
-  fragOptions: initialFragOptions,
-  fragPlan: initialFragPlan,
-  reassemblyBuffer: initialReassemblyBuffer,
-  activeFragTab: 'SPLITTER',
-  isFragAutoPlaying: false,
+  return {
+    tcpEngine: initialTcp,
+    isTcpPlaying: false,
+    activeTcpTab: 'CONGESTION_GRAPH',
+    activeSackStep: 1,
 
-  activeJourneyStep: 1,
-  isJourneyPlaying: false,
+    errorInputAscii: '123456789',
+    errorParityType: 'even',
+    errorFlippedBits: [],
 
-  bandwidthParams: initialBandwidthParams,
-  bandwidthResult: initialBandwidthResult,
+    townScope: 'INTRA_TOWN',
+    townIncident: 'NONE',
+    townPacketType: 'HTTP_GET',
+    isTownPlaying: true,
+    townSpeedMultiplier: 1,
+    selectedTownNodeId: 'home_laptop',
+    selectedInterCityNodeId: 'city_paris_ixp',
+    showSubterraneanCutaway: true,
+    townFlightPackets: [createFlightPacket('HTTP_GET', initialTownPath.pathLinks)],
+    townMetrics: {
+      totalPacketsEmitted: 1,
+      totalPacketsDelivered: 1,
+      totalPacketsDropped: 0,
+      totalPacketsRerouted: 0,
+      averageTransitLatencyUs: initialTownCalc.totalLatencyUs,
+      currentPhysicalPathLengthMeters: initialTownCalc.totalDistanceMeters,
+      opticalSignalQualityDb: initialTownCalc.opticalSnrDb,
+    },
 
-  errorSandboxInput: 'HELLO NETWORK',
-  errorSandboxParityType: 'even',
-  errorSandboxFlippedBits: [],
+    fragOptions: initialFragOpts,
+    fragPlan: initialFragPlan,
+    reassemblyBuffer: initialReassembly,
+    isFragAutoPlaying: false,
 
-  testReport: initialTestReport,
+    packetOptions: defaultPacketOpts,
+    encapsulatedPacket: buildEncapsulatedPacket(defaultPacketOpts, 4, true),
+    inspectedOsiLayer: 4,
+    bandwidthParams: initialBwParams,
+    bandwidthResult: calculateBandwidthMetrics(initialBwParams),
+
+    testReport: runAutomatedTestSuite(),
+  };
 };
 
 export const networkReducer = (state: NetworkState, action: NetworkAction): NetworkState => {
   switch (action.type) {
-    case 'UPDATE_PACKET_OPTIONS': {
-      const updatedOptions: PacketBuilderOptions = {
-        ...state.packetOptions,
-        ...action.payload,
-      };
-      const updatedPacket = buildEncapsulatedPacket(
-        updatedOptions,
-        state.inspectedOsiLayer,
-        state.isEncapsulationDirection
-      );
-      return {
-        ...state,
-        packetOptions: updatedOptions,
-        encapsulatedPacket: updatedPacket,
-      };
+    case 'SET_TCP_ALGO': {
+      let fresh = createInitialTcpState(action.payload);
+      for (let i = 0; i < 5; i++) fresh = stepTcpNormalAck(fresh);
+      return { ...state, tcpEngine: fresh };
     }
-
-    case 'SET_INSPECTED_LAYER':
-      return {
-        ...state,
-        inspectedOsiLayer: action.payload,
-        encapsulatedPacket: {
-          ...state.encapsulatedPacket,
-          currentLayer: action.payload,
-        },
-      };
-
-    case 'SET_ENCAPSULATION_DIRECTION':
-      return {
-        ...state,
-        isEncapsulationDirection: action.payload,
-        encapsulatedPacket: {
-          ...state.encapsulatedPacket,
-          isEncapsulating: action.payload,
-        },
-      };
-
-    case 'SET_OSI_PLAYING':
-      return {
-        ...state,
-        isOsiPlaying: action.payload,
-      };
-
-    case 'STEP_OSI_LAYER': {
-      if (state.isEncapsulationDirection) {
-        // Going down 7 -> 1
-        const nextLayer = (state.inspectedOsiLayer > 1 ? state.inspectedOsiLayer - 1 : 7) as OsiLayerNumber;
-        return {
-          ...state,
-          inspectedOsiLayer: nextLayer,
-          encapsulatedPacket: {
-            ...state.encapsulatedPacket,
-            currentLayer: nextLayer,
-          },
-        };
-      } else {
-        // Going up 1 -> 7 (Decapsulation)
-        const nextLayer = (state.inspectedOsiLayer < 7 ? state.inspectedOsiLayer + 1 : 1) as OsiLayerNumber;
-        return {
-          ...state,
-          inspectedOsiLayer: nextLayer,
-          encapsulatedPacket: {
-            ...state.encapsulatedPacket,
-            currentLayer: nextLayer,
-          },
-        };
-      }
-    }
-
-    case 'RESET_PACKET': {
-      const resetOpts = createDefaultPacketOptions();
-      const resetPkt = buildEncapsulatedPacket(resetOpts, 7, true);
-      return {
-        ...state,
-        packetOptions: resetOpts,
-        encapsulatedPacket: resetPkt,
-        inspectedOsiLayer: 7,
-        isEncapsulationDirection: true,
-        isOsiPlaying: false,
-      };
-    }
-
-    // Stack-to-Stack Full Journey Actions
-    case 'SET_STACK_JOURNEY_STEP':
-      return {
-        ...state,
-        stackJourneyStep: Math.max(1, Math.min(10, action.payload)),
-      };
-
-    case 'SET_STACK_JOURNEY_PLAYING':
-      return {
-        ...state,
-        isStackJourneyPlaying: action.payload,
-      };
-
-    case 'SET_STACK_JOURNEY_SPEED':
-      return {
-        ...state,
-        stackJourneySpeed: action.payload,
-      };
-
-    case 'NEXT_STACK_JOURNEY_STEP':
-      return {
-        ...state,
-        stackJourneyStep: state.stackJourneyStep < 10 ? state.stackJourneyStep + 1 : 1,
-      };
-
-    case 'PREV_STACK_JOURNEY_STEP':
-      return {
-        ...state,
-        stackJourneyStep: state.stackJourneyStep > 1 ? state.stackJourneyStep - 1 : 10,
-      };
-
-    case 'RESET_STACK_JOURNEY':
-      return {
-        ...state,
-        stackJourneyStep: 1,
-        isStackJourneyPlaying: false,
-      };
-
-    // TCP Engine Actions
-    case 'SET_TCP_ALGO':
-      return {
-        ...state,
-        tcpEngine: {
-          ...state.tcpEngine,
-          algorithm: action.payload,
-          lastEvent: `Algorithme sélectionné : TCP ${action.payload}`,
-        },
-      };
-
     case 'STEP_TCP_ACK':
-      return {
-        ...state,
-        tcpEngine: stepTcpNormalAck(state.tcpEngine),
-      };
-
-    case 'INJECT_TCP_TRIPLE_DUP_ACK':
-      return {
-        ...state,
-        tcpEngine: stepTcpTripleDupAck(state.tcpEngine),
-      };
-
-    case 'INJECT_TCP_RTO_TIMEOUT':
-      return {
-        ...state,
-        tcpEngine: stepTcpTimeoutRto(state.tcpEngine),
-      };
-
-    case 'RESET_TCP_ENGINE':
-      return {
-        ...state,
-        tcpEngine: INITIAL_TCP_STATE,
-        isTcpEnginePlaying: false,
-        activeTcpScenarioStep: 1,
-      };
-
-    case 'SET_TCP_ENGINE_PLAYING':
-      return {
-        ...state,
-        isTcpEnginePlaying: action.payload,
-      };
-
-    case 'SET_TCP_RWND':
+      return { ...state, tcpEngine: stepTcpNormalAck(state.tcpEngine) };
+    case 'INJECT_TCP_DUP_ACK':
+      return { ...state, tcpEngine: stepTcpTripleDupAck(state.tcpEngine) };
+    case 'INJECT_TCP_RTO':
+      return { ...state, tcpEngine: stepTcpTimeoutRto(state.tcpEngine) };
+    case 'SET_TCP_RWND': {
+      const rwndMss = Math.max(0, Math.min(36, action.payload));
       return {
         ...state,
         tcpEngine: {
           ...state.tcpEngine,
-          rwndMss: Math.max(0, Math.min(64, action.payload)),
-          lastEvent: `Fenêtre récepteur rwnd ajustée à ${action.payload} MSS`,
+          rwndMss,
         },
       };
-
+    }
+    case 'SET_TCP_IN_FLIGHT': {
+      return {
+        ...state,
+        tcpEngine: {
+          ...state.tcpEngine,
+          inFlightMss: Math.max(0, action.payload),
+        },
+      };
+    }
     case 'SET_TCP_TAB':
+      return { ...state, activeTcpTab: action.payload };
+    case 'SET_TCP_PLAYING':
+      return { ...state, isTcpPlaying: action.payload };
+    case 'SET_SACK_STEP':
+      return { ...state, activeSackStep: Math.max(1, Math.min(5, action.payload)) };
+    case 'RESET_TCP_ENGINE':
+      return { ...state, tcpEngine: createInitialTcpState(state.tcpEngine.algorithm), isTcpPlaying: false };
+
+    // CRC32 & Parity Actions
+    case 'SET_ERROR_INPUT':
+      return { ...state, errorInputAscii: action.payload, errorFlippedBits: [] };
+    case 'SET_ERROR_PARITY_TYPE':
+      return { ...state, errorParityType: action.payload };
+    case 'TOGGLE_FLIPPED_BIT': {
+      const idx = action.payload;
+      const exists = state.errorFlippedBits.includes(idx);
+      const nextBits = exists
+        ? state.errorFlippedBits.filter(b => b !== idx)
+        : [...state.errorFlippedBits, idx];
+      return { ...state, errorFlippedBits: nextBits };
+    }
+    case 'CLEAR_FLIPPED_BITS':
+      return { ...state, errorFlippedBits: [] };
+
+    // Town & Inter-City Actions
+    case 'SET_TOWN_SCOPE': {
+      const nextScope = action.payload;
+      const defaultIncident: TownIncidentType = 'NONE';
+      const pathData = computeActiveTownPath(nextScope, defaultIncident);
+      const calc = calculateTownPathMetrics(pathData.pathLinks, defaultIncident, 540);
       return {
         ...state,
-        activeTcpTab: action.payload,
-        activeTcpScenarioStep: 1,
+        townScope: nextScope,
+        townIncident: defaultIncident,
+        townFlightPackets: [createFlightPacket(state.townPacketType, pathData.pathLinks)],
+        townMetrics: {
+          ...state.townMetrics,
+          averageTransitLatencyUs: calc.totalLatencyUs,
+          currentPhysicalPathLengthMeters: calc.totalDistanceMeters,
+          opticalSignalQualityDb: calc.opticalSnrDb,
+        },
       };
-
-    case 'SET_TCP_SCENARIO_STEP':
+    }
+    case 'SET_TOWN_INCIDENT': {
+      const incident = action.payload;
+      const pathData = computeActiveTownPath(state.townScope, incident);
+      const calc = calculateTownPathMetrics(pathData.pathLinks, incident, 540);
       return {
         ...state,
-        activeTcpScenarioStep: action.payload,
+        townIncident: incident,
+        townFlightPackets: [createFlightPacket(state.townPacketType, pathData.pathLinks)],
+        townMetrics: {
+          ...state.townMetrics,
+          averageTransitLatencyUs: calc.totalLatencyUs,
+          currentPhysicalPathLengthMeters: calc.totalDistanceMeters,
+          opticalSignalQualityDb: calc.opticalSnrDb,
+        },
       };
-
-    case 'NEXT_TCP_SCENARIO_STEP':
+    }
+    case 'SET_TOWN_PACKET_TYPE':
+      return { ...state, townPacketType: action.payload };
+    case 'SET_TOWN_PLAYING':
+      return { ...state, isTownPlaying: action.payload };
+    case 'SET_TOWN_SPEED':
+      return { ...state, townSpeedMultiplier: action.payload };
+    case 'SELECT_TOWN_NODE':
+      return { ...state, selectedTownNodeId: action.payload };
+    case 'SELECT_INTERCITY_NODE':
+      return { ...state, selectedInterCityNodeId: action.payload };
+    case 'TOGGLE_SUBTERRANEAN_CUTAWAY':
+      return { ...state, showSubterraneanCutaway: !state.showSubterraneanCutaway };
+    case 'EMIT_TOWN_PACKET': {
+      const pType = action.payload ?? state.townPacketType;
+      const pathData = computeActiveTownPath(state.townScope, state.townIncident);
+      const pkt = createFlightPacket(pType, pathData.pathLinks);
       return {
         ...state,
-        activeTcpScenarioStep:
-          state.activeTcpScenarioStep < action.payload ? state.activeTcpScenarioStep + 1 : 1,
+        townFlightPackets: [...state.townFlightPackets.slice(-10), pkt],
+        townMetrics: {
+          ...state.townMetrics,
+          totalPacketsEmitted: state.townMetrics.totalPacketsEmitted + 1,
+        },
       };
+    }
+    case 'STEP_TOWN_SIMULATION': {
+      const pathData = computeActiveTownPath(state.townScope, state.townIncident);
+      const stepped = stepTownPackets(
+        state.townFlightPackets,
+        pathData.pathLinks,
+        state.townIncident,
+        state.townSpeedMultiplier
+      );
+      const deliv = stepped.newlyDelivered.length;
+      const drop = stepped.newlyDropped.length;
+      const activeList =
+        stepped.updatedPackets.length === 0
+          ? [createFlightPacket(state.townPacketType, pathData.pathLinks)]
+          : stepped.updatedPackets;
 
-    case 'PREV_TCP_SCENARIO_STEP':
       return {
         ...state,
-        activeTcpScenarioStep:
-          state.activeTcpScenarioStep > 1 ? state.activeTcpScenarioStep - 1 : action.payload,
+        townFlightPackets: activeList,
+        townMetrics: {
+          ...state.townMetrics,
+          totalPacketsDelivered: state.townMetrics.totalPacketsDelivered + deliv,
+          totalPacketsDropped: state.townMetrics.totalPacketsDropped + drop,
+          totalPacketsRerouted: pathData.isRerouted
+            ? state.townMetrics.totalPacketsRerouted + deliv
+            : state.townMetrics.totalPacketsRerouted,
+        },
       };
+    }
 
-    // IP Fragmentation & Reassembly Actions
+    // IPv4 Fragmentation Actions
     case 'UPDATE_FRAG_OPTIONS': {
-      const updatedOpts: FragmentationInputOptions = {
-        ...state.fragOptions,
-        ...action.payload,
-      };
-      const updatedPlan = calculateIpFragmentation(updatedOpts);
-      const updatedBuffer = createInitialReassemblyBuffer(updatedPlan.originalPayloadSize);
+      const nextOpts: FragmentationInputOptions = { ...state.fragOptions, ...action.payload };
+      const nextPlan = calculateIpFragmentation(nextOpts);
       return {
         ...state,
-        fragOptions: updatedOpts,
-        fragPlan: updatedPlan,
-        reassemblyBuffer: updatedBuffer,
+        fragOptions: nextOpts,
+        fragPlan: nextPlan,
+        reassemblyBuffer: createInitialReassemblyBuffer(nextPlan.originalPayloadSize),
         isFragAutoPlaying: false,
       };
     }
-
-    case 'SET_FRAG_TAB':
+    case 'RECEIVE_FRAGMENT_BY_INDEX': {
+      const frag = state.fragPlan.fragments[action.payload];
+      if (!frag) return state;
       return {
         ...state,
-        activeFragTab: action.payload,
-      };
-
-    case 'LOAD_FRAG_SCENARIO': {
-      const foundPreset = FRAGMENTATION_PRESET_SCENARIOS.find(p => p.id === action.payload);
-      if (!foundPreset) return state;
-
-      const newOpts: FragmentationInputOptions = {
-        ...state.fragOptions,
-        packetTotalSize: foundPreset.packetTotalSize,
-        bottleneckMtu: foundPreset.bottleneckMtu,
-        isDfSet: foundPreset.isDfSet,
-        payloadText: foundPreset.payloadSample,
-      };
-      const newPlan = calculateIpFragmentation(newOpts);
-      const newBuffer = createInitialReassemblyBuffer(newPlan.originalPayloadSize);
-
-      return {
-        ...state,
-        fragOptions: newOpts,
-        fragPlan: newPlan,
-        reassemblyBuffer: newBuffer,
-        isFragAutoPlaying: false,
+        reassemblyBuffer: insertFragmentIntoBuffer(state.reassemblyBuffer, frag),
       };
     }
-
     case 'RECEIVE_NEXT_FRAGMENT': {
-      if (state.fragPlan.fragments.length === 0 || state.reassemblyBuffer.isComplete) {
-        return state;
-      }
-      // Find the first fragment not yet in buffer
       const nextFrag = state.fragPlan.fragments.find(
         f => !state.reassemblyBuffer.receivedFragments.some(rf => rf.fragmentIndex === f.fragmentIndex)
       );
-      if (!nextFrag) return state;
-
-      const newBuffer = insertFragmentIntoBuffer(state.reassemblyBuffer, nextFrag);
+      if (!nextFrag) return { ...state, isFragAutoPlaying: false };
       return {
         ...state,
-        reassemblyBuffer: newBuffer,
+        reassemblyBuffer: insertFragmentIntoBuffer(state.reassemblyBuffer, nextFrag),
       };
     }
-
-    case 'RECEIVE_FRAGMENT_BY_INDEX': {
-      const targetFrag = state.fragPlan.fragments.find(f => f.fragmentIndex === action.payload);
-      if (!targetFrag) return state;
-      const newBuffer = insertFragmentIntoBuffer(state.reassemblyBuffer, targetFrag);
+    case 'RESET_REASSEMBLY_BUFFER':
       return {
         ...state,
-        reassemblyBuffer: newBuffer,
-      };
-    }
-
-    case 'RESET_REASSEMBLY_BUFFER': {
-      const resetBuffer = createInitialReassemblyBuffer(state.fragPlan.originalPayloadSize);
-      return {
-        ...state,
-        reassemblyBuffer: resetBuffer,
+        reassemblyBuffer: createInitialReassemblyBuffer(state.fragPlan.originalPayloadSize),
         isFragAutoPlaying: false,
       };
-    }
-
     case 'SET_FRAG_AUTO_PLAY':
-      return {
-        ...state,
-        isFragAutoPlaying: action.payload,
-      };
-
+      return { ...state, isFragAutoPlaying: action.payload };
     case 'TICK_REASSEMBLY_TIMER':
       return {
         ...state,
         reassemblyBuffer: tickReassemblyBufferTimer(state.reassemblyBuffer),
       };
 
-    case 'RESET_FRAG_ALL': {
-      const resetPlan = calculateIpFragmentation(initialFragOptions);
+    // OSI & Bandwidth Actions
+    case 'UPDATE_PACKET_OPTIONS': {
+      const nextOpts = { ...state.packetOptions, ...action.payload };
       return {
         ...state,
-        fragOptions: initialFragOptions,
-        fragPlan: resetPlan,
-        reassemblyBuffer: createInitialReassemblyBuffer(resetPlan.originalPayloadSize),
-        activeFragTab: 'SPLITTER',
-        isFragAutoPlaying: false,
+        packetOptions: nextOpts,
+        encapsulatedPacket: buildEncapsulatedPacket(nextOpts, state.inspectedOsiLayer, true),
       };
     }
-
-    // Journey Actions
-    case 'SET_JOURNEY_STEP':
+    case 'SET_INSPECTED_LAYER':
       return {
         ...state,
-        activeJourneyStep: Math.max(1, Math.min(5, action.payload)),
+        inspectedOsiLayer: action.payload,
+        encapsulatedPacket: buildEncapsulatedPacket(state.packetOptions, action.payload, true),
       };
-
-    case 'SET_JOURNEY_PLAYING':
-      return {
-        ...state,
-        isJourneyPlaying: action.payload,
-      };
-
-    case 'NEXT_JOURNEY_STEP':
-      return {
-        ...state,
-        activeJourneyStep: state.activeJourneyStep < 5 ? state.activeJourneyStep + 1 : 1,
-      };
-
-    case 'PREV_JOURNEY_STEP':
-      return {
-        ...state,
-        activeJourneyStep: state.activeJourneyStep > 1 ? state.activeJourneyStep - 1 : 5,
-      };
-
-    case 'RESET_JOURNEY':
-      return {
-        ...state,
-        activeJourneyStep: 1,
-        isJourneyPlaying: false,
-      };
-
-    // Bandwidth Actions
     case 'UPDATE_BANDWIDTH_PARAMS': {
-      const updatedParams: BandwidthCalculationParams = {
-        ...state.bandwidthParams,
-        ...action.payload,
-      };
-      const updatedResult = calculateBandwidthMetrics(updatedParams);
+      const nextBw = { ...state.bandwidthParams, ...action.payload };
       return {
         ...state,
-        bandwidthParams: updatedParams,
-        bandwidthResult: updatedResult,
+        bandwidthParams: nextBw,
+        bandwidthResult: calculateBandwidthMetrics(nextBw),
       };
     }
-
-    // Error Sandbox Actions
-    case 'SET_ERROR_INPUT':
-      return {
-        ...state,
-        errorSandboxInput: action.payload,
-        errorSandboxFlippedBits: [],
-      };
-
-    case 'SET_ERROR_PARITY_TYPE':
-      return {
-        ...state,
-        errorSandboxParityType: action.payload,
-      };
-
-    case 'TOGGLE_FLIPPED_BIT': {
-      const bitIdx = action.payload;
-      const alreadyFlipped = state.errorSandboxFlippedBits.includes(bitIdx);
-      const newFlipped = alreadyFlipped
-        ? state.errorSandboxFlippedBits.filter(i => i !== bitIdx)
-        : [...state.errorSandboxFlippedBits, bitIdx];
-      return {
-        ...state,
-        errorSandboxFlippedBits: newFlipped,
-      };
-    }
-
-    case 'CLEAR_FLIPPED_BITS':
-      return {
-        ...state,
-        errorSandboxFlippedBits: [],
-      };
 
     case 'RUN_TEST_SUITE':
-      return {
-        ...state,
-        testReport: runAutomatedTestSuite(),
-      };
-
+      return { ...state, testReport: runAutomatedTestSuite() };
+    case 'RESET_ALL':
+      return createInitialState();
     default:
       return state;
   }
@@ -614,77 +451,31 @@ interface NetworkStoreContextValue {
 const NetworkStoreContext = createContext<NetworkStoreContextValue | null>(null);
 
 export const NetworkStoreProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [state, dispatch] = useReducer(networkReducer, initialNetworkState);
+  const [state, dispatch] = useReducer(networkReducer, undefined, createInitialState);
 
-  // Auto-play timer for OSI encapsulation animation
   useEffect(() => {
-    if (!state.isOsiPlaying) return;
-    const interval = setInterval(() => {
-      dispatch({ type: 'STEP_OSI_LAYER' });
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [state.isOsiPlaying]);
-
-  // Auto-play timer for Network Journey animation
-  useEffect(() => {
-    if (!state.isJourneyPlaying) return;
-    const interval = setInterval(() => {
-      dispatch({ type: 'NEXT_JOURNEY_STEP' });
-    }, 3500);
-    return () => clearInterval(interval);
-  }, [state.isJourneyPlaying]);
-
-  // Auto-play timer for Stack-to-Stack Full Journey animation
-  useEffect(() => {
-    if (!state.isStackJourneyPlaying) return;
-    const baseDuration = 3200;
-    const intervalDuration = baseDuration / (state.stackJourneySpeed || 1);
-    const interval = setInterval(() => {
-      dispatch({ type: 'NEXT_STACK_JOURNEY_STEP' });
-    }, intervalDuration);
-    return () => clearInterval(interval);
-  }, [state.isStackJourneyPlaying, state.stackJourneySpeed]);
-
-  // Auto-play timer for TCP Congestion Engine
-  useEffect(() => {
-    if (!state.isTcpEnginePlaying) return;
-    const interval = setInterval(() => {
+    if (!state.isTcpPlaying) return;
+    const timer = setInterval(() => {
       dispatch({ type: 'STEP_TCP_ACK' });
-    }, 1800);
-    return () => clearInterval(interval);
-  }, [state.isTcpEnginePlaying]);
+    }, 1200);
+    return () => clearInterval(timer);
+  }, [state.isTcpPlaying]);
 
-  // Auto-play timer for IP Fragment Reassembly
+  useEffect(() => {
+    if (!state.isTownPlaying) return;
+    const timer = setInterval(() => {
+      dispatch({ type: 'STEP_TOWN_SIMULATION' });
+    }, 60);
+    return () => clearInterval(timer);
+  }, [state.isTownPlaying, state.townScope, state.townIncident, state.townSpeedMultiplier]);
+
   useEffect(() => {
     if (!state.isFragAutoPlaying) return;
-    const interval = setInterval(() => {
-      if (state.reassemblyBuffer.isComplete || state.reassemblyBuffer.isTimedOut) {
-        dispatch({ type: 'SET_FRAG_AUTO_PLAY', payload: false });
-        return;
-      }
+    const timer = setInterval(() => {
       dispatch({ type: 'RECEIVE_NEXT_FRAGMENT' });
-    }, 1400);
-    return () => clearInterval(interval);
-  }, [state.isFragAutoPlaying, state.reassemblyBuffer.isComplete, state.reassemblyBuffer.isTimedOut]);
-
-  // Reassembly buffer 1-second RFC 791 timer countdown
-  useEffect(() => {
-    if (
-      state.reassemblyBuffer.isComplete ||
-      state.reassemblyBuffer.isTimedOut ||
-      state.reassemblyBuffer.receivedFragments.length === 0
-    ) {
-      return;
-    }
-    const timerInterval = setInterval(() => {
-      dispatch({ type: 'TICK_REASSEMBLY_TIMER' });
-    }, 1000);
-    return () => clearInterval(timerInterval);
-  }, [
-    state.reassemblyBuffer.isComplete,
-    state.reassemblyBuffer.isTimedOut,
-    state.reassemblyBuffer.receivedFragments.length,
-  ]);
+    }, 900);
+    return () => clearInterval(timer);
+  }, [state.isFragAutoPlaying]);
 
   return (
     <NetworkStoreContext.Provider value={{ state, dispatch }}>
@@ -694,9 +485,9 @@ export const NetworkStoreProvider: React.FC<{ children: ReactNode }> = ({ childr
 };
 
 export const useNetworkStore = (): NetworkStoreContextValue => {
-  const context = useContext(NetworkStoreContext);
-  if (!context) {
+  const ctx = useContext(NetworkStoreContext);
+  if (!ctx) {
     throw new Error('useNetworkStore must be used within a NetworkStoreProvider');
   }
-  return context;
+  return ctx;
 };

@@ -1,6 +1,6 @@
 /**
- * Pure Functional TCP Congestion Control, Flow Control, and Reliability Engine
- * Implements RFC 5681 (TCP Congestion Control), RFC 2018 (TCP SACK), and RFC 793.
+ * TCP Congestion Control (CUBIC RFC 8312, Reno RFC 5681, Tahoe, BBR) & Sliding Window Engine
+ * Pure functional implementation with mathematical precision.
  */
 
 import {
@@ -10,375 +10,387 @@ import {
   TcpSegmentBlock,
   TcpLossScenarioStep,
 } from '../types/network';
+import { clamp, roundTo } from './functional';
 
 export interface TcpEngineState {
   readonly algorithm: TcpAlgorithm;
-  readonly phase: TcpCongestionPhase;
+  readonly currentRtt: number;
   readonly cwndMss: number;
   readonly ssthreshMss: number;
-  readonly currentRtt: number;
   readonly rwndMss: number;
+  readonly wMaxMss: number;
+  readonly epochStartRtt: number;
+  readonly phase: TcpCongestionPhase;
+  readonly history: TcpRttDataPoint[];
+  readonly baseSeqNum: number;
+  readonly inFlightMss: number;
   readonly mssBytes: number;
-  readonly rttHistory: readonly TcpRttDataPoint[];
-  readonly lastEvent: string;
 }
 
-export const INITIAL_TCP_STATE: TcpEngineState = {
-  algorithm: 'RENO',
-  phase: 'SLOW_START',
-  cwndMss: 1,
-  ssthreshMss: 16,
-  currentRtt: 0,
-  rwndMss: 32,
-  mssBytes: 1460,
-  rttHistory: [
-    {
-      rttIndex: 0,
-      cwndMss: 1,
-      ssthreshMss: 16,
-      phase: 'SLOW_START',
-      eventDescription: 'Connexion établie (3-Way Handshake terminé) • Initial cwnd = 1 MSS',
-    },
-  ],
-  lastEvent: 'Connexion initialisée',
-};
+export const CUBIC_C = 0.4;
+export const CUBIC_BETA = 0.7; // Multiplicative decrease factor in RFC 8312 (retains 70% of W_max)
 
 /**
- * Computes next RTT tick for normal ACK progress
+ * Computes CUBIC window size W_cubic(t) = C * (t - K)^3 + W_max
+ * where K = cubic_root(W_max * (1 - beta) / C)
+ */
+export const calculateCubicWindow = (
+  tRtts: number,
+  wMaxMss: number,
+  cParam = CUBIC_C,
+  betaParam = CUBIC_BETA
+): { readonly wCubicMss: number; readonly kFactor: number } => {
+  const kFactor = Math.cbrt((wMaxMss * (1 - betaParam)) / cParam);
+  const delta = tRtts - kFactor;
+  const wCubic = cParam * Math.pow(delta, 3) + wMaxMss;
+  return {
+    wCubicMss: roundTo(Math.max(1, wCubic), 2),
+    kFactor: roundTo(kFactor, 2),
+  };
+};
+
+export const createInitialTcpState = (algorithm: TcpAlgorithm = 'CUBIC'): TcpEngineState => {
+  const initialPoint: TcpRttDataPoint = {
+    rttIndex: 0,
+    cwndMss: 1,
+    ssthreshMss: 16,
+    rwndMss: 24,
+    effectiveWindowMss: 1,
+    phase: 'SLOW_START',
+    eventDescription: `Initialisation ${algorithm} : cwnd = 1 MSS, ssthresh = 16 MSS`,
+    wMaxMss: 20,
+  };
+
+  return {
+    algorithm,
+    currentRtt: 0,
+    cwndMss: 1,
+    ssthreshMss: 16,
+    rwndMss: 24,
+    wMaxMss: 20,
+    epochStartRtt: 0,
+    phase: 'SLOW_START',
+    history: [initialPoint],
+    baseSeqNum: 100,
+    inFlightMss: 1,
+    mssBytes: 1460,
+  };
+};
+
+export const INITIAL_TCP_STATE: TcpEngineState = createInitialTcpState('CUBIC');
+
+/**
+ * Pure transition for a normal RTT acknowledgment without packet loss
  */
 export const stepTcpNormalAck = (state: TcpEngineState): TcpEngineState => {
   const nextRtt = state.currentRtt + 1;
   let nextCwnd = state.cwndMss;
-  let nextSsthresh = state.ssthreshMss;
-  let nextPhase = state.phase;
-  let eventDesc = '';
+  let nextPhase: TcpCongestionPhase = state.phase;
+  let nextEpochStart = state.epochStartRtt;
+  let desc = '';
 
-  if (state.phase === 'SLOW_START') {
-    // Exponential growth: cwnd doubles every RTT (or +1 per ACK in that RTT)
-    nextCwnd = state.cwndMss * 2;
-    if (nextCwnd >= state.ssthreshMss) {
-      nextPhase = 'CONGESTION_AVOIDANCE';
-      eventDesc = `Seuil ssthresh (${state.ssthreshMss} MSS) atteint &rarr; Bascule en Évitement de Congestion`;
+  if (state.algorithm === 'BBR') {
+    // BBR ProbeBW pacing gain cycle: [1.25, 0.75, 1, 1, 1, 1, 1, 1]
+    const bbrCycleGains = [1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+    const bdpEstimate = 18; // Estimated Bottleneck Bandwidth * RTprop in MSS
+    if (state.cwndMss < bdpEstimate && state.phase === 'SLOW_START') {
+      nextCwnd = roundTo(Math.min(bdpEstimate, state.cwndMss * 2), 2);
+      nextPhase = nextCwnd >= bdpEstimate ? 'BBR_PROBE_BW' : 'SLOW_START';
+      desc = `BBR Startup : recherche rapide du BDP (${nextCwnd} MSS)`;
     } else {
-      eventDesc = `Slow Start : cwnd doublé (${state.cwndMss} &rarr; ${nextCwnd} MSS)`;
+      nextPhase = 'BBR_PROBE_BW';
+      const gain = bbrCycleGains[nextRtt % bbrCycleGains.length];
+      nextCwnd = roundTo(bdpEstimate * gain, 2);
+      desc = `BBR ProbeBW : pacing_gain = ${gain}x autour du BDP (${nextCwnd} MSS)`;
     }
-  } else if (state.phase === 'CONGESTION_AVOIDANCE') {
-    // Linear growth (AIMD Additive Increase): +1 MSS per RTT
-    if (state.algorithm === 'CUBIC') {
-      // Cubic approximation: rapid probe
-      nextCwnd = Math.round(state.cwndMss + Math.max(1, (nextRtt % 4) * 0.8));
-      eventDesc = `CUBIC : Croissance concave/convexe vers capacité optimale (${nextCwnd} MSS)`;
-    } else if (state.algorithm === 'BBR') {
-      nextCwnd = Math.min(state.rwndMss, state.cwndMss + 2);
-      eventDesc = `BBR : Sondage Max Bandwidth x Min RTT (${nextCwnd} MSS)`;
-    } else {
-      // Reno / Tahoe: pure AIMD (+1 MSS)
-      nextCwnd = state.cwndMss + 1;
-      eventDesc = `Évitement de Congestion (AIMD) : +1 MSS par RTT (${state.cwndMss} &rarr; ${nextCwnd} MSS)`;
+  } else if (state.cwndMss < state.ssthreshMss) {
+    // Exponential Slow Start for CUBIC, Reno, Tahoe
+    nextCwnd = roundTo(Math.min(state.ssthreshMss, state.cwndMss * 2), 2);
+    nextPhase = nextCwnd >= state.ssthreshMss ? 'CONGESTION_AVOIDANCE' : 'SLOW_START';
+    if (nextPhase === 'CONGESTION_AVOIDANCE') {
+      nextEpochStart = nextRtt;
     }
-  } else if (state.phase === 'FAST_RECOVERY') {
-    // Coming out of fast recovery into congestion avoidance
+    desc = `Slow Start exponentiel : cwnd double à ${nextCwnd} MSS`;
+  } else {
     nextPhase = 'CONGESTION_AVOIDANCE';
-    nextCwnd = state.ssthreshMss;
-    eventDesc = `Sortie de Fast Recovery &rarr; Reprise en Évitement de Congestion (${nextCwnd} MSS)`;
-  } else if (state.phase === 'TIMEOUT_RTO') {
-    nextPhase = 'SLOW_START';
-    nextCwnd = 2;
-    eventDesc = `Reprise après Timeout : Slow Start depuis 1 &rarr; 2 MSS`;
+    if (state.algorithm === 'CUBIC') {
+      const tElapsed = Math.max(1, nextRtt - state.epochStartRtt);
+      const { wCubicMss, kFactor } = calculateCubicWindow(tElapsed, state.wMaxMss);
+      // Ensure monotonic growth or concave plateau toward W_max then convex probing
+      nextCwnd = roundTo(Math.max(state.cwndMss + 0.35, wCubicMss), 2);
+      const region = tElapsed < kFactor ? 'profil concave vers W_max' : 'sonde convexe au-delà de W_max';
+      desc = `CUBIC W(t=${tElapsed}) = ${nextCwnd} MSS (${region}, K=${kFactor})`;
+    } else {
+      // Reno & Tahoe AIMD: +1 MSS per RTT
+      nextCwnd = roundTo(state.cwndMss + 1, 2);
+      desc = `${state.algorithm} Évitement de congestion (AIMD) : +1 MSS -> ${nextCwnd} MSS`;
+    }
   }
 
-  // Bound by max displayable / reasonable size
-  const clampedCwnd = Math.min(64, Math.max(1, nextCwnd));
+  nextCwnd = clamp(nextCwnd, 1, 42);
+  const effectiveWin = roundTo(Math.min(nextCwnd, state.rwndMss), 2);
 
-  const newPoint: TcpRttDataPoint = {
+  const point: TcpRttDataPoint = {
     rttIndex: nextRtt,
-    cwndMss: clampedCwnd,
-    ssthreshMss: nextSsthresh,
+    cwndMss: nextCwnd,
+    ssthreshMss: state.ssthreshMss,
+    rwndMss: state.rwndMss,
+    effectiveWindowMss: effectiveWin,
     phase: nextPhase,
-    eventDescription: eventDesc,
+    eventDescription: desc,
+    wMaxMss: state.wMaxMss,
   };
 
   return {
     ...state,
     currentRtt: nextRtt,
-    cwndMss: clampedCwnd,
-    ssthreshMss: nextSsthresh,
+    cwndMss: nextCwnd,
     phase: nextPhase,
-    rttHistory: [...state.rttHistory.slice(-25), newPoint],
-    lastEvent: eventDesc,
+    epochStartRtt: nextEpochStart,
+    baseSeqNum: state.baseSeqNum + Math.max(1, Math.floor(effectiveWin / 2)),
+    inFlightMss: Math.min(Math.ceil(effectiveWin), Math.max(1, Math.floor(effectiveWin * 0.75))),
+    history: [...state.history.slice(-28), point],
   };
 };
 
 /**
- * Handles 3 Duplicate ACKs (Fast Retransmit & Fast Recovery)
+ * Pure transition when 3 Duplicate ACKs are received (Fast Retransmit / Fast Recovery)
  */
 export const stepTcpTripleDupAck = (state: TcpEngineState): TcpEngineState => {
   const nextRtt = state.currentRtt + 1;
-  const oldCwnd = state.cwndMss;
-  const newSsthresh = Math.max(2, Math.floor(oldCwnd / 2));
-
-  let nextCwnd = newSsthresh;
+  const recordedWMax = state.cwndMss;
+  let newSsthresh = state.ssthreshMss;
+  let newCwnd = state.cwndMss;
   let nextPhase: TcpCongestionPhase = 'FAST_RECOVERY';
-  let eventDesc = '';
+  let desc = '';
 
-  if (state.algorithm === 'TAHOE') {
-    // Old TCP Tahoe resets cwnd to 1 MSS on any loss
-    nextCwnd = 1;
+  if (state.algorithm === 'CUBIC') {
+    // CUBIC RFC 8312: Multiplicative decrease by beta = 0.7
+    newSsthresh = roundTo(Math.max(2, state.cwndMss * CUBIC_BETA), 2);
+    newCwnd = newSsthresh;
+    desc = `3 Dup-ACK (CUBIC) : W_max = ${recordedWMax} MSS, réduction 0.7x -> cwnd = ssthresh = ${newCwnd} MSS`;
+  } else if (state.algorithm === 'RENO') {
+    // Reno: Halve cwnd (0.5x) and enter Fast Recovery
+    newSsthresh = roundTo(Math.max(2, Math.floor(state.cwndMss / 2)), 2);
+    newCwnd = newSsthresh;
+    desc = `3 Dup-ACK (Reno Fast Recovery) : ssthresh = cwnd = ${newCwnd} MSS (réduction 50%)`;
+  } else if (state.algorithm === 'TAHOE') {
+    // Tahoe: Treats 3 Dup-ACK like Timeout -> resets cwnd to 1 MSS!
+    newSsthresh = roundTo(Math.max(2, Math.floor(state.cwndMss / 2)), 2);
+    newCwnd = 1;
     nextPhase = 'SLOW_START';
-    eventDesc = `Tahoe : 3 Dup-ACKs reçus &rarr; ssthresh=${newSsthresh} MSS, cwnd réinitialisé à 1 MSS`;
+    desc = `3 Dup-ACK (Tahoe) : ssthresh = ${newSsthresh} MSS, chute radicale cwnd = 1 MSS (Slow Start)`;
   } else {
-    // TCP Reno / Modern Fast Recovery
-    nextCwnd = newSsthresh + 3; // +3 for the 3 packets that escaped
-    nextPhase = 'FAST_RECOVERY';
-    eventDesc = `3 Dup-ACKs reçus (Perte isolée) &rarr; Fast Retransmit immédiat ! ssthresh=${newSsthresh} MSS, cwnd=${nextCwnd} MSS (Fast Recovery)`;
+    // BBR: Modest pacing adjustment on loss
+    newSsthresh = state.ssthreshMss;
+    newCwnd = roundTo(Math.max(4, state.cwndMss * 0.85), 2);
+    nextPhase = 'BBR_PROBE_BW';
+    desc = `3 Dup-ACK (BBR) : maintien du débit proche du BDP (${newCwnd} MSS)`;
   }
 
-  const newPoint: TcpRttDataPoint = {
+  const effectiveWin = roundTo(Math.min(newCwnd, state.rwndMss), 2);
+  const point: TcpRttDataPoint = {
     rttIndex: nextRtt,
-    cwndMss: nextCwnd,
+    cwndMss: newCwnd,
     ssthreshMss: newSsthresh,
+    rwndMss: state.rwndMss,
+    effectiveWindowMss: effectiveWin,
     phase: nextPhase,
-    eventDescription: eventDesc,
+    eventDescription: desc,
     isLossEvent: true,
+    wMaxMss: recordedWMax,
   };
 
   return {
     ...state,
     currentRtt: nextRtt,
-    cwndMss: nextCwnd,
+    cwndMss: newCwnd,
     ssthreshMss: newSsthresh,
+    wMaxMss: recordedWMax,
+    epochStartRtt: nextRtt,
     phase: nextPhase,
-    rttHistory: [...state.rttHistory.slice(-25), newPoint],
-    lastEvent: eventDesc,
+    inFlightMss: Math.max(1, Math.floor(effectiveWin / 2)),
+    history: [...state.history.slice(-28), point],
   };
 };
 
 /**
- * Handles Retransmission Timeout (RTO) - Severe Congestion / Black hole
+ * Pure transition when Retransmission Timeout (RTO) expires
  */
 export const stepTcpTimeoutRto = (state: TcpEngineState): TcpEngineState => {
   const nextRtt = state.currentRtt + 1;
-  const oldCwnd = state.cwndMss;
-  const newSsthresh = Math.max(2, Math.floor(oldCwnd / 2));
-  const nextCwnd = 1; // RTO always collapses cwnd to 1 MSS
-  const nextPhase: TcpCongestionPhase = 'TIMEOUT_RTO';
-  const eventDesc = `Expiration Minuteur RTO (Perte Majeure / Congestion Réseau) &rarr; cwnd écroulé à 1 MSS, ssthresh=${newSsthresh} MSS`;
+  const recordedWMax = state.cwndMss;
+  const factor = state.algorithm === 'CUBIC' ? CUBIC_BETA : 0.5;
+  const newSsthresh = roundTo(Math.max(2, Math.floor(state.cwndMss * factor)), 2);
+  const newCwnd = 1;
+  const effectiveWin = roundTo(Math.min(newCwnd, state.rwndMss), 2);
 
-  const newPoint: TcpRttDataPoint = {
+  const point: TcpRttDataPoint = {
     rttIndex: nextRtt,
-    cwndMss: nextCwnd,
+    cwndMss: newCwnd,
     ssthreshMss: newSsthresh,
-    phase: nextPhase,
-    eventDescription: eventDesc,
+    rwndMss: state.rwndMss,
+    effectiveWindowMss: effectiveWin,
+    phase: 'TIMEOUT_RTO',
+    eventDescription: `Expiration RTO (${state.algorithm}) : ssthresh = ${newSsthresh} MSS, réinitialisation cwnd = 1 MSS`,
     isLossEvent: true,
+    wMaxMss: recordedWMax,
   };
 
   return {
     ...state,
     currentRtt: nextRtt,
-    cwndMss: nextCwnd,
+    cwndMss: newCwnd,
     ssthreshMss: newSsthresh,
-    phase: nextPhase,
-    rttHistory: [...state.rttHistory.slice(-25), newPoint],
-    lastEvent: eventDesc,
+    wMaxMss: recordedWMax,
+    epochStartRtt: nextRtt,
+    phase: 'SLOW_START',
+    inFlightMss: 1,
+    history: [...state.history.slice(-28), point],
   };
 };
 
 /**
- * Generates sliding window segment blocks
+ * Computes the Sliding Window (Fenêtre glissante) segment array
+ * Effective Window W = min(cwnd, rwnd)
  */
 export const computeSlidingWindowSegments = (
-  baseAckedSeq: number,
-  cwndMss: number,
-  rwndMss: number,
-  mssBytes: number = 1460,
-  totalSegments: number = 16
-): {
-  segments: TcpSegmentBlock[];
-  effectiveWindowMss: number;
-  inFlightCount: number;
-  usableCount: number;
-} => {
-  const effectiveWindowMss = Math.min(cwndMss, rwndMss);
-  const inFlightCount = Math.min(Math.ceil(effectiveWindowMss * 0.6), effectiveWindowMss);
-  const usableCount = Math.max(0, effectiveWindowMss - inFlightCount);
+  baseSeqNum: number,
+  effectiveWindowMss: number,
+  inFlightMss: number,
+  totalSlots = 18
+): TcpSegmentBlock[] => {
+  const ackedCount = 3;
+  const winSize = Math.max(0, Math.round(effectiveWindowMss));
+  const flightCount = clamp(Math.round(inFlightMss), 0, winSize);
+  const usableCount = Math.max(0, winSize - flightCount);
 
   const segments: TcpSegmentBlock[] = [];
-
-  for (let i = 1; i <= totalSegments; i++) {
-    const seqNum = baseAckedSeq + (i - 1) * mssBytes;
-    const startByte = seqNum;
-    const endByte = seqNum + mssBytes - 1;
-    const byteRange = `${startByte}–${endByte}`;
-
+  for (let i = 0; i < totalSlots; i++) {
+    const seq = baseSeqNum - ackedCount + i;
+    const byteStart = seq * 1460;
+    const byteEnd = byteStart + 1459;
     let status: TcpSegmentBlock['status'] = 'BLOCKED_OUTSIDE';
 
-    if (i <= 3) {
+    if (i < ackedCount) {
       status = 'ACKED';
-    } else if (i <= 3 + inFlightCount) {
+    } else if (i < ackedCount + flightCount) {
       status = 'IN_FLIGHT';
-    } else if (i <= 3 + inFlightCount + usableCount) {
+    } else if (i < ackedCount + flightCount + usableCount) {
       status = 'USABLE_WINDOW';
     } else {
       status = 'BLOCKED_OUTSIDE';
     }
 
     segments.push({
-      seqNum: i,
-      byteRange,
+      seqNum: seq,
+      byteRange: `${byteStart}–${byteEnd}`,
       status,
-      isLost: i === 5 && status === 'IN_FLIGHT', // visual demo lost flag
     });
   }
 
-  return {
-    segments,
-    effectiveWindowMss,
-    inFlightCount,
-    usableCount,
-  };
+  return segments;
 };
 
 /**
- * Step-by-step Fast Retransmit Scenario (3 Duplicate ACKs)
+ * Generates comparative curves across 20 RTTs for CUBIC, Reno, Tahoe, and BBR
+ * with a synthetic packet loss at RTT = 8
  */
-export const getFastRetransmitSteps = (): TcpLossScenarioStep[] => [
+export const generateAlgorithmComparisonCurves = (): Array<{
+  readonly rtt: number;
+  readonly cubic: number;
+  readonly reno: number;
+  readonly tahoe: number;
+  readonly bbr: number;
+}> => {
+  let sCubic = createInitialTcpState('CUBIC');
+  let sReno = createInitialTcpState('RENO');
+  let sTahoe = createInitialTcpState('TAHOE');
+  let sBbr = createInitialTcpState('BBR');
+
+  const rows = [
+    {
+      rtt: 0,
+      cubic: sCubic.cwndMss,
+      reno: sReno.cwndMss,
+      tahoe: sTahoe.cwndMss,
+      bbr: sBbr.cwndMss,
+    },
+  ];
+
+  for (let r = 1; r <= 18; r++) {
+    if (r === 8) {
+      // Inject 3 Dup-ACK loss event at RTT 8
+      sCubic = stepTcpTripleDupAck(sCubic);
+      sReno = stepTcpTripleDupAck(sReno);
+      sTahoe = stepTcpTripleDupAck(sTahoe);
+      sBbr = stepTcpTripleDupAck(sBbr);
+    } else {
+      sCubic = stepTcpNormalAck(sCubic);
+      sReno = stepTcpNormalAck(sReno);
+      sTahoe = stepTcpNormalAck(sTahoe);
+      sBbr = stepTcpNormalAck(sBbr);
+    }
+
+    rows.push({
+      rtt: r,
+      cubic: sCubic.cwndMss,
+      reno: sReno.cwndMss,
+      tahoe: sTahoe.cwndMss,
+      bbr: sBbr.cwndMss,
+    });
+  }
+
+  return rows;
+};
+
+/**
+ * Fast Retransmit & SACK (Selective Acknowledgment RFC 2018) Step-by-Step Trace
+ */
+export const getFastRetransmitSackSteps = (): TcpLossScenarioStep[] => [
   {
     stepNumber: 1,
-    title: 'Émission de la Rafale de Segments (Seq #1, #2, #3, #4, #5)',
-    senderAction: 'L’émetteur expédie 5 segments consécutifs en vol sur le réseau.',
-    inFlightPackets: [1, 2, 3, 4, 5],
-    receiverAction: 'En attente des segments.',
-    ackGenerated: { ackNum: 1, isDup: false, dupCount: 0 },
-    technicalInsight: 'Le réseau achemine les paquets mais un routeur saturé subit une congestion.',
+    title: 'Émission de la rafale dans la fenêtre glissante (Seg #101 à #105)',
+    senderAction: 'Envoi de 5 segments consécutifs sans attendre (pipelining TCP). Le segment #102 subit une perte en transit.',
+    inFlightPackets: [101, 102, 103, 104, 105],
+    receiverAction: 'Réception normale de Seg #101 (octets 1460–2919).',
+    ackGenerated: { ackNum: 102, isDup: false, dupCount: 0 },
+    technicalInsight: 'L’ACK 102 cumulatif confirme la bonne réception jusqu’au segment #101 et réclame le segment #102.',
   },
   {
     stepNumber: 2,
-    title: 'Perte du Segment #3 sur le Câble (Drop Réseau)',
-    senderAction: 'Segments #1 et #2 arrivent à destination.',
-    inFlightPackets: [3, 4, 5],
-    receiverAction: 'Réception de #1 et #2 &rarr; Envoi de ACK #3 (attend le paquet 3). Le paquet #3 est détruit par le routeur !',
-    ackGenerated: { ackNum: 3, isDup: false, dupCount: 0 },
-    technicalInsight: 'L’émetteur reçoit ACK #3 (ACK normal cumulatif).',
+    title: 'Arrivée hors-séquence de Seg #103 -> 1er Dup-ACK + Option SACK',
+    senderAction: 'Attente des acquittements en retour.',
+    inFlightPackets: [103, 104, 105],
+    receiverAction: 'Seg #103 arrive mais #102 manque ! Le récepteur stocke #103 en tampon hors-ordre.',
+    ackGenerated: { ackNum: 102, isDup: true, dupCount: 1, sackBlocks: 'SACK=[103..103]' },
+    technicalInsight: 'Grâce à RFC 2018 (SACK), le récepteur signale le trou (#102) tout en confirmant qu’il possède déjà #103.',
   },
   {
     stepNumber: 3,
-    title: 'Arrivée du Segment #4 (Hors-Séquence) &rarr; 1er Duplicate ACK #3',
-    senderAction: 'L’émetteur attend les accusés de réception.',
-    inFlightPackets: [4, 5],
-    receiverAction: 'Réception du Segment #4. Trou détecté (Segment #3 manquant) ! Le récepteur génère un Duplicate ACK #3.',
-    ackGenerated: { ackNum: 3, isDup: true, dupCount: 1 },
-    technicalInsight: 'Duplicate ACK 1/3 : Le récepteur signale qu’il a reçu des octets plus loin mais attend toujours l’octet du paquet #3.',
+    title: 'Arrivée de Seg #104 -> 2e Dup-ACK cumulatif',
+    senderAction: 'Réception du 2e ACK dupliqué sur #102 (seuil Fast Retransmit = 3).',
+    inFlightPackets: [104, 105],
+    receiverAction: 'Seg #104 est mis en mémoire tampon à la suite de #103.',
+    ackGenerated: { ackNum: 102, isDup: true, dupCount: 2, sackBlocks: 'SACK=[103..104]' },
+    technicalInsight: 'L’émetteur attend un 3e Dup-ACK pour distinguer une vraie perte d’un simple réordonnancement.',
   },
   {
     stepNumber: 4,
-    title: 'Arrivée du Segment #5 (Hors-Séquence) &rarr; 2e Duplicate ACK #3',
-    senderAction: 'L’émetteur reçoit le 1er Dup-ACK.',
-    inFlightPackets: [5],
-    receiverAction: 'Réception du Segment #5. Toujours pas de segment #3 &rarr; Génération du 2e Duplicate ACK #3.',
-    ackGenerated: { ackNum: 3, isDup: true, dupCount: 2 },
-    technicalInsight: 'Duplicate ACK 2/3 : La file d’attente confirme la progression des paquets ultérieurs.',
+    title: 'Arrivée de Seg #105 -> 3e Dup-ACK & Déclenchement Fast Retransmit',
+    senderAction: '3 Dup-ACK reçus ! Retransmission immédiate de Seg #102 sans attendre le minuteur RTO.',
+    inFlightPackets: [102],
+    receiverAction: 'Seg #105 est stocké. Bloc SACK élargi à [103..105].',
+    ackGenerated: { ackNum: 102, isDup: true, dupCount: 3, sackBlocks: 'SACK=[103..105]' },
+    technicalInsight: 'CUBIC réduit cwnd de seulement 30% (beta=0.7) contre 50% pour Reno, préservant le débit sur liens rapides.',
   },
   {
     stepNumber: 5,
-    title: 'Arrivée d’un autre paquet &rarr; 3e Duplicate ACK #3 : Déclenchement FAST RETRANSMIT !',
-    senderAction: 'L’émetteur reçoit le 3e Duplicate ACK #3. Déduction immédiate : le paquet #3 est perdu !',
-    inFlightPackets: [3],
-    receiverAction: 'Envoi du 3e Duplicate ACK #3.',
-    ackGenerated: { ackNum: 3, isDup: true, dupCount: 3 },
-    technicalInsight: 'FAST RETRANSMIT : L’émetteur n’attend PAS l’expiration du minuteur RTO (qui prendrait 200 à 500 ms). Il réexpédie le Segment #3 instantanément !',
-  },
-  {
-    stepNumber: 6,
-    title: 'Réception du Segment #3 réémis & ACK Cumulatif Global (#6)',
-    senderAction: 'Segment #3 réémis arrive au récepteur.',
-    inFlightPackets: [],
-    receiverAction: 'Le trou est comblé ! Le récepteur possède désormais #1, #2, #3, #4, #5. Il envoie un ACK Cumulatif #6 !',
-    ackGenerated: { ackNum: 6, isDup: false, dupCount: 0 },
-    technicalInsight: 'FAST RECOVERY : La fenêtre cwnd est divisée par 2 (ssthresh = cwnd / 2) et la transmission reprend en Évitement de Congestion sans repasser par 1 MSS.',
-  },
-];
-
-/**
- * Step-by-step SACK (Selective Acknowledgment) Scenario
- */
-export const getSackSteps = (): TcpLossScenarioStep[] => [
-  {
-    stepNumber: 1,
-    title: 'Rafale de 8 Segments (Seq 1000 à 8000)',
-    senderAction: 'L’émetteur envoie les segments [1, 2, 3, 4, 5, 6, 7, 8].',
-    inFlightPackets: [1, 2, 3, 4, 5, 6, 7, 8],
-    receiverAction: 'En attente.',
-    ackGenerated: { ackNum: 1000, isDup: false, dupCount: 0 },
-    technicalInsight: 'Sous TCP classique sans SACK, si les segments 3 et 6 sont perdus, l’émetteur devrait tout réexpédier de 3 à 8 (Go-Back-N inefficace).',
-  },
-  {
-    stepNumber: 2,
-    title: 'Perte Multiple : Segments #3 et #6 jetés',
-    senderAction: 'Segments transitent sur un lien avec gigue/congestion.',
-    inFlightPackets: [1, 2, 4, 5, 7, 8],
-    receiverAction: 'Réception de #1 et #2 &rarr; ACK=3000. Réception de #4 et #5 &rarr; Trou en #3 !',
-    ackGenerated: { ackNum: 3000, isDup: true, dupCount: 1, sackBlocks: 'SACK: [4000-6000]' },
-    technicalInsight: 'Le champ Option TCP SACK (RFC 2018) informe explicitement l’émetteur que les octets 4000-6000 sont bien arrivés en mémoire !',
-  },
-  {
-    stepNumber: 3,
-    title: 'Arrivée des Segments #7 et #8 & Bloc SACK Étendu',
-    senderAction: 'L’émetteur lit l’option SACK dans l’en-tête TCP.',
-    inFlightPackets: [7, 8],
-    receiverAction: 'Réception de #7 et #8 (trou en #6). Génération d’un ACK avec 2 blocs SACK.',
-    ackGenerated: { ackNum: 3000, isDup: true, dupCount: 2, sackBlocks: 'SACK: [4000-6000], [7000-9000]' },
-    technicalInsight: 'Les blocs SACK cartographient les îlots de données reçues : Bloc 1: [4000-6000], Bloc 2: [7000-9000].',
-  },
-  {
-    stepNumber: 4,
-    title: 'Réémission Chirurgicale Exclusif des Trous (#3 et #6)',
-    senderAction: 'L’émetteur NE renvoie PAS 4, 5, 7, 8. Il réémet UNIQUEMENT le segment #3 et le segment #6 !',
-    inFlightPackets: [3, 6],
-    receiverAction: 'Réception des 2 segments manquants & Réassemblage parfait dans le tampon.',
-    ackGenerated: { ackNum: 9000, isDup: false, dupCount: 0 },
-    technicalInsight: 'Économie massive de bande passante : aucun octet déjà reçu n’est gaspillé en réémission inutile !',
-  },
-];
-
-/**
- * Step-by-step Flow Control (rwnd & Zero Window Probe) Scenario
- */
-export const getFlowControlSteps = (): TcpLossScenarioStep[] => [
-  {
-    stepNumber: 1,
-    title: 'Récepteur Rapide : Fenêtre rwnd = 64 Ko',
-    senderAction: 'L’émetteur envoie des données à plein régime.',
-    inFlightPackets: [1, 2, 3, 4],
-    receiverAction: 'L’application du récepteur lit immédiatement les données du socket. Buffer libre.',
-    ackGenerated: { ackNum: 5000, isDup: false, dupCount: 0, sackBlocks: 'rwnd=65535 (64 Ko)' },
-    technicalInsight: 'Flow Control : Le champ Window Size de l’en-tête TCP indique l’espace mémoire disponible dans le tampon de réception du noyau OS.',
-  },
-  {
-    stepNumber: 2,
-    title: 'Application Réceptrice Saturée & Tampon Rempli &rarr; rwnd = 0 (Zero Window)',
-    senderAction: 'L’émetteur s’apprête à envoyer la suite.',
-    inFlightPackets: [],
-    receiverAction: 'L’application locale est occupée (CPU à 100% ou I/O disque lent). Le tampon se remplit jusqu’au bord. Le récepteur envoie un ACK avec rwnd = 0 !',
-    ackGenerated: { ackNum: 8000, isDup: false, dupCount: 0, sackBlocks: 'rwnd = 0 (ZERO WINDOW)' },
-    technicalInsight: 'Fenêtre Nulle : L’émetteur a l’INTERDICTION absolue d’envoyer de nouvelles données utiles sous peine de forcer un drop récepteur.',
-  },
-  {
-    stepNumber: 3,
-    title: 'Blocage de l’Émetteur & Envoi d’une Sonde de Fenêtre Nulle (ZWP)',
-    senderAction: 'L’émetteur arme son Minuteur de Persistance (Persist Timer) et envoie périodiquement une Sonde ZWP (1 octet factice).',
-    inFlightPackets: [99],
-    receiverAction: 'Reçoit le ZWP probe, constate que le tampon est encore saturé et renvoie rwnd = 0.',
-    ackGenerated: { ackNum: 8000, isDup: false, dupCount: 0, sackBlocks: 'rwnd = 0 (En attente)' },
-    technicalInsight: 'Sans la sonde Zero-Window Probe, si le message de mise à jour de fenêtre ultérieur était perdu, la connexion serait bloquée pour toujours dans un interblocage (deadlock) !',
-  },
-  {
-    stepNumber: 4,
-    title: 'L’Application Libère le Tampon & Mise à Jour de Fenêtre (Window Update)',
-    senderAction: 'Reçoit l’annonce rwnd = 32 Ko et reprend immédiatement l’envoi de données.',
-    inFlightPackets: [9, 10],
-    receiverAction: 'L’application lit les 8 Ko en attente &rarr; Envoi spontané d’un TCP Window Update : rwnd = 32768.',
-    ackGenerated: { ackNum: 8000, isDup: false, dupCount: 0, sackBlocks: 'rwnd = 32768 (32 Ko libérés)' },
-    technicalInsight: 'Le contrôle de flux adapte la cadence de l’émetteur à la vitesse d’absorption du récepteur, indépendamment de la vitesse du réseau.',
+    title: 'Réception de Seg #102 retransmis -> Comblement du trou & ACK 106',
+    senderAction: 'Reprise de l’émission à partir du segment #106 en phase Congestion Avoidance.',
+    inFlightPackets: [106, 107],
+    receiverAction: 'Seg #102 comble l’intervalle manquant ! Les segments #102 à #105 sont livrés d’un bloc à la couche L7.',
+    ackGenerated: { ackNum: 106, isDup: false, dupCount: 0 },
+    technicalInsight: 'Un seul segment (#102) a été retransmis grâce à SACK, évitant de renvoyer inutilement #103, #104 et #105.',
   },
 ];

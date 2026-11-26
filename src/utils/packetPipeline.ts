@@ -1,305 +1,239 @@
 /**
- * Pure Functional Packet Pipeline:
- * Handles Encapsulation (L7 -> L1) and Decapsulation (L1 -> L7)
- * Generates exact headers, checksums, and bitstreams.
+ * OSI Encapsulation Pipeline (Layers 7 to 1) & Bandwidth / Goodput Calculator
+ * Pure functional transformations.
  */
 
 import {
-  ApplicationData,
-  TransportHeader,
-  NetworkHeader,
-  DataLinkHeader,
-  PhysicalLayerData,
-  EncapsulatedPacket,
-  OsiLayerNumber,
   OsiLayerInfo,
-  TransportProtocol,
-  ApplicationProtocol,
-  ParityType,
+  OsiLayerNumber,
+  PacketBuilderOptions,
+  EncapsulatedPacket,
+  BandwidthCalculationParams,
+  BandwidthCalculationResult,
 } from '../types/network';
-import { stringToBytes, stringToBinary, countOnes, toHex16, toHex32 } from './functional';
-import { calculateCrc32Bytes, calculateInternetChecksum } from './errorDetection';
+import { calculateCrc32, calculateInternetChecksum, calculateParity, asciiToBinary } from './errorDetection';
+import { roundTo } from './functional';
 
-export const OSI_LAYERS_INFO: Record<OsiLayerNumber, OsiLayerInfo> = {
-  7: {
+export const OSI_LAYERS: OsiLayerInfo[] = [
+  {
     layer: 7,
     nameFr: 'Application',
     nameEn: 'Application',
-    pduName: 'Donnée / Message',
-    color: '#EC4899', // Pink
-    borderClass: 'border-pink-500/30',
-    bgClass: 'bg-pink-500/10',
-    textClass: 'text-pink-400',
-    badgeClass: 'bg-pink-500/20 text-pink-300 border-pink-500/30',
-    descriptionFr: 'Interface avec l’utilisateur et protocoles d’application de haut niveau (HTTP, HTTPS, DNS, SMTP, SSH).',
-    keyProtocols: ['HTTP/3', 'HTTPS', 'DNS', 'SMTP', 'SSH', 'MQTT'],
-    typicalEquipment: 'Navigateur, Client Web, Serveur applicatif',
+    pduName: 'Données (Message)',
+    accentColor: '#38bdf8',
+    descriptionFr: 'Interface directe avec les processus applicatifs et protocoles de haut niveau.',
+    keyProtocols: ['HTTP/3', 'DNS', 'TLS', 'SSH', 'SMTP'],
+    typicalEquipment: 'Passerelle applicative, Proxy inverse, Serveur Web',
     headerSizeTypicalBytes: 0,
   },
-  6: {
+  {
     layer: 6,
     nameFr: 'Présentation',
     nameEn: 'Presentation',
-    pduName: 'Donnée formatée',
-    color: '#8B5CF6', // Purple
-    borderClass: 'border-purple-500/30',
-    bgClass: 'bg-purple-500/10',
-    textClass: 'text-purple-400',
-    badgeClass: 'bg-purple-500/20 text-purple-300 border-purple-500/30',
-    descriptionFr: 'Traduction, encodage des caractères (UTF-8, ASCII), chiffrement TLS/SSL et compression des données.',
-    keyProtocols: ['TLS 1.3', 'SSL', 'UTF-8', 'JSON', 'JPEG', 'GZIP'],
-    typicalEquipment: 'Bibliothèques de sérialisation et cryptographie',
-    headerSizeTypicalBytes: 5,
+    pduName: 'Données formatées',
+    accentColor: '#60a5fa',
+    descriptionFr: 'Traduction syntaxique, encodage UTF-8/JSON, compression et chiffrement TLS.',
+    keyProtocols: ['TLS 1.3', 'UTF-8', 'JSON', 'Protobuf'],
+    typicalEquipment: 'Terminateur TLS, Codec matériel',
+    headerSizeTypicalBytes: 0,
   },
-  5: {
+  {
     layer: 5,
     nameFr: 'Session',
     nameEn: 'Session',
-    pduName: 'Donnée de session',
-    color: '#6366F1', // Indigo
-    borderClass: 'border-indigo-500/30',
-    bgClass: 'bg-indigo-500/10',
-    textClass: 'text-indigo-400',
-    badgeClass: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30',
-    descriptionFr: 'Gestion, synchronisation, ouverture et fermeture des dialogues et sessions entre applications distantes.',
-    keyProtocols: ['RPC', 'NetBIOS', 'PPTP', 'Sockets POSIX'],
-    typicalEquipment: 'Gestionnaire de connexions du Système d’Exploitation',
+    pduName: 'Données de session',
+    accentColor: '#818cf8',
+    descriptionFr: 'Ouverture, maintien, synchronisation et reprise des dialogues entre hôtes.',
+    keyProtocols: ['NetBIOS', 'RPC', 'SOCKS5'],
+    typicalEquipment: 'Pare-feu à états (Stateful Firewall)',
     headerSizeTypicalBytes: 0,
   },
-  4: {
+  {
     layer: 4,
     nameFr: 'Transport',
     nameEn: 'Transport',
     pduName: 'Segment (TCP) / Datagramme (UDP)',
-    color: '#3B82F6', // Blue
-    borderClass: 'border-blue-500/30',
-    bgClass: 'bg-blue-500/10',
-    textClass: 'text-blue-400',
-    badgeClass: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
-    descriptionFr: 'Communication de bout-en-bout fiable (TCP) ou rapide (UDP), adressage des ports logiques, contrôle de flux et segmentation.',
-    keyProtocols: ['TCP', 'UDP', 'QUIC', 'SCTP'],
-    typicalEquipment: 'Pile réseau de l’OS (Kernel), Pare-feu applicatif L4',
+    accentColor: '#f59e0b',
+    descriptionFr: 'Multiplexage par ports, fiabilité de bout en bout, fenêtre glissante et contrôle de congestion (CUBIC, BBR).',
+    keyProtocols: ['TCP (RFC 9293)', 'UDP', 'QUIC', 'SCTP'],
+    typicalEquipment: 'Équilibreur de charge L4 (Load Balancer)',
     headerSizeTypicalBytes: 20,
   },
-  3: {
+  {
     layer: 3,
     nameFr: 'Réseau',
     nameEn: 'Network',
-    pduName: 'Paquet (Packet)',
-    color: '#06B6D4', // Cyan
-    borderClass: 'border-cyan-500/30',
-    bgClass: 'bg-cyan-500/10',
-    textClass: 'text-cyan-400',
-    badgeClass: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',
-    descriptionFr: 'Adressage logique universel (adresses IP), routage des paquets entre différents sous-réseaux et décrémentation du TTL.',
-    keyProtocols: ['IPv4', 'IPv6', 'ICMP', 'OSPF', 'BGP', 'ARP'],
-    typicalEquipment: 'Routeur (Router L3), Commutateur de niveau 3 (Layer 3 Switch)',
+    pduName: 'Paquet IP',
+    accentColor: '#10b981',
+    descriptionFr: 'Adressage logique IPv4/IPv6, routage inter-réseaux (OSPF, BGP), gestion du TTL et fragmentation MTU.',
+    keyProtocols: ['IPv4 (RFC 791)', 'IPv6', 'ICMP', 'OSPF', 'BGP-4'],
+    typicalEquipment: 'Routeur L3, Commutateur multicouche',
     headerSizeTypicalBytes: 20,
   },
-  2: {
+  {
     layer: 2,
-    nameFr: 'Liaison de Données',
+    nameFr: 'Liaison de données',
     nameEn: 'Data Link',
-    pduName: 'Trame (Frame)',
-    color: '#10B981', // Emerald
-    borderClass: 'border-emerald-500/30',
-    bgClass: 'bg-emerald-500/10',
-    textClass: 'text-emerald-400',
-    badgeClass: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
-    descriptionFr: 'Transmission physique locale sur le même segment réseau, adressage matériel (adresses MAC) et contrôle d’intégrité (FCS CRC-32).',
-    keyProtocols: ['Ethernet (IEEE 802.3)', 'Wi-Fi (802.11)', 'PPP', 'VLAN (802.1Q)'],
-    typicalEquipment: 'Commutateur (Switch L2), Carte Réseau (NIC), Pont (Bridge)',
-    headerSizeTypicalBytes: 18, // 14 Header + 4 Trailer FCS
+    pduName: 'Trame Ethernet',
+    accentColor: '#ec4899',
+    descriptionFr: 'Adressage physique MAC (48 bits), commutation locale et détection d’erreurs par FCS CRC32.',
+    keyProtocols: ['Ethernet IEEE 802.3', 'Wi-Fi 802.11ax', 'VLAN 802.1Q', 'ARP'],
+    typicalEquipment: 'Commutateur L2 (Switch), Pont réseau, Carte NIC',
+    headerSizeTypicalBytes: 18,
   },
-  1: {
+  {
     layer: 1,
     nameFr: 'Physique',
     nameEn: 'Physical',
-    pduName: 'Bits / Signaux',
-    color: '#F59E0B', // Amber
-    borderClass: 'border-amber-500/30',
-    bgClass: 'bg-amber-500/10',
-    textClass: 'text-amber-400',
-    badgeClass: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
-    descriptionFr: 'Conversion des trames en signaux électriques, impulsions lumineuses ou ondes radio (bits 0 et 1), synchronisation d’horloge et débit binaire.',
-    keyProtocols: ['1000BASE-T', '10GBASE-LR', 'V.90', 'Codage Manchester', 'NRZ'],
-    typicalEquipment: 'Câble RJ45 Cuivre, Fibre Optique, Hub / Répéteur, Émetteur Radio',
-    headerSizeTypicalBytes: 8, // 8B Preamble + SFD + 12B IFG
+    pduName: 'Flux de Bits / Symboles',
+    accentColor: '#a855f7',
+    descriptionFr: 'Transmission physique des bits sur le médium (impulsions laser 1310/1550 nm, codage NRZ/PAM4, radio).',
+    keyProtocols: ['10GBASE-SR/LR', 'ITU-T G.652D', 'DWDM', 'NRZ / Manchester'],
+    typicalEquipment: 'Transceiver SFP+/QSFP28, Répéteur optique EDFA, Fibre',
+    headerSizeTypicalBytes: 20,
   },
-};
-
-export interface PacketBuilderOptions {
-  readonly payloadText: string;
-  readonly appProtocol: ApplicationProtocol;
-  readonly transportProtocol: TransportProtocol;
-  readonly sourcePort: number;
-  readonly destinationPort: number;
-  readonly sourceIp: string;
-  readonly destinationIp: string;
-  readonly sourceMac: string;
-  readonly destinationMac: string;
-  readonly ttl: number;
-  readonly parityType: ParityType;
-}
+];
 
 export const createDefaultPacketOptions = (): PacketBuilderOptions => ({
-  payloadText: 'GET /index.html HTTP/1.1\r\nHost: serveur-reseau.fr\r\nAccept: text/html',
+  payloadText: 'GET /api/telemetry HTTP/1.1',
   appProtocol: 'HTTP',
   transportProtocol: 'TCP',
   sourcePort: 54321,
-  destinationPort: 80,
-  sourceIp: '192.168.1.10',
+  destinationPort: 443,
+  sourceIp: '192.168.1.100',
   destinationIp: '198.51.100.25',
-  sourceMac: '00:1A:2B:3C:4D:5E',
-  destinationMac: '70:85:C2:A1:B2:C3',
+  sourceMac: 'BC:24:11:99:A1:04',
+  destinationMac: '00:1C:73:FA:90:01',
   ttl: 64,
   parityType: 'even',
 });
 
-/**
- * Pure builder creating full encapsulated packet with all real calculated checksums
- */
 export const buildEncapsulatedPacket = (
   options: PacketBuilderOptions,
-  currentLayer: OsiLayerNumber = 1,
-  isEncapsulating: boolean = true
+  currentLayer: OsiLayerNumber = 7,
+  isEncapsulating = true
 ): EncapsulatedPacket => {
-  const payloadBytesArray = stringToBytes(options.payloadText);
-  const payloadBytesCount = payloadBytesArray.length;
+  const payloadBytes = new TextEncoder().encode(options.payloadText).length;
+  const transportHeaderLen = options.transportProtocol === 'TCP' ? 20 : 8;
+  const ipTotalLen = 20 + transportHeaderLen + payloadBytes;
 
-  const appData: ApplicationData = {
-    protocol: options.appProtocol,
-    payloadText: options.payloadText,
-    payloadBytes: payloadBytesCount,
-    mimeType: options.appProtocol === 'HTTP' ? 'text/html; charset=utf-8' : 'application/octet-stream',
-  };
-
-  // Transport Header (Layer 4)
-  const isTcp = options.transportProtocol === 'TCP';
-  const transportHeaderLen = isTcp ? 20 : 8;
-  const transportChecksumBytes = [
-    ...payloadBytesArray,
-    (options.sourcePort >> 8) & 0xff,
-    options.sourcePort & 0xff,
-    (options.destinationPort >> 8) & 0xff,
-    options.destinationPort & 0xff,
+  const ipBytesSample = [
+    0x45, 0x00, (ipTotalLen >> 8) & 0xff, ipTotalLen & 0xff,
+    0x4a, 0x2f, 0x40, 0x00,
+    options.ttl & 0xff, options.transportProtocol === 'TCP' ? 6 : 17,
   ];
-  const transportChecksumNum = calculateInternetChecksum(transportChecksumBytes);
-
-  const transportHeader: TransportHeader = {
-    protocol: options.transportProtocol,
-    sourcePort: options.sourcePort,
-    destinationPort: options.destinationPort,
-    sequenceNumber: 3829104712,
-    ackNumber: 1048576,
-    flags: {
-      syn: false,
-      ack: true,
-      fin: false,
-      psh: true,
-      rst: false,
-    },
-    windowSize: 64240,
-    checksumHex: toHex16(transportChecksumNum),
-    headerLengthBytes: transportHeaderLen,
-  };
-
-  // Network Header (Layer 3)
-  const ipHeaderLengthBytes = 20;
-  const totalIpLengthBytes = ipHeaderLengthBytes + transportHeaderLen + payloadBytesCount;
-  
-  // Fake IP header bytes array for checksum calculation
-  const ipHeaderBytesForChecksum = [
-    0x45, // Version 4, IHL 5 (20 bytes)
-    0x00, // TOS / DSCP
-    (totalIpLengthBytes >> 8) & 0xff,
-    totalIpLengthBytes & 0xff,
-    0x1A, 0x2B, // Identification
-    0x40, 0x00, // Flags (Don't fragment DF=1)
-    options.ttl & 0xff,
-    isTcp ? 6 : 17, // Protocol number (6 TCP, 17 UDP)
-    0x00, 0x00, // Checksum placeholder
-    192, 168, 1, 10, // Source IP
-    198, 51, 100, 25, // Dest IP
-  ];
-  const ipChecksumNum = calculateInternetChecksum(ipHeaderBytesForChecksum);
-
-  const networkHeader: NetworkHeader = {
-    version: 4,
-    ihl: 5,
-    tos: 0,
-    totalLengthBytes: totalIpLengthBytes,
-    identification: 6699,
-    flags: {
-      df: true,
-      mf: false,
-    },
-    fragmentOffset: 0,
-    ttl: options.ttl,
-    protocolNumber: isTcp ? 6 : 17,
-    checksumHex: toHex16(ipChecksumNum),
-    sourceIp: options.sourceIp,
-    destinationIp: options.destinationIp,
-    headerLengthBytes: ipHeaderLengthBytes,
-  };
-
-  // Layer 2 - Data Link (Ethernet II Frame)
-  // Compute true CRC32 on Ethernet payload (IP Packet + L2 Headers)
-  const frameBytesForCrc = [
-    ...stringToBytes(options.destinationMac.replace(/:/g, '')),
-    ...stringToBytes(options.sourceMac.replace(/:/g, '')),
-    0x08, 0x00, // EtherType IPv4
-    ...ipHeaderBytesForChecksum,
-    ...payloadBytesArray,
-  ];
-  const crc32Int = calculateCrc32Bytes(frameBytesForCrc);
-
-  const dataLinkHeader: DataLinkHeader = {
-    preambleBytes: 8, // 7B Preamble + 1B SFD
-    destinationMac: options.destinationMac,
-    sourceMac: options.sourceMac,
-    etherTypeHex: '0x0800',
-    headerLengthBytes: 14,
-    trailerFcsBytes: 4,
-    interFrameGapBytes: 12,
-    fcsCrc32Hex: toHex32(crc32Int),
-    isCorrupted: false,
-  };
-
-  // Layer 1 - Physical Bitstream
-  const fullBinaryStream = stringToBinary(options.payloadText);
-  const bitCount = fullBinaryStream.length;
-  
-  // Parity calculation per byte
-  const parityBits: string[] = [];
-  for (let i = 0; i < fullBinaryStream.length; i += 8) {
-    const byteSlice = fullBinaryStream.slice(i, i + 8);
-    const ones = countOnes(byteSlice);
-    if (options.parityType === 'even') {
-      parityBits.push(ones % 2 === 0 ? '0' : '1');
-    } else if (options.parityType === 'odd') {
-      parityBits.push(ones % 2 === 0 ? '1' : '0');
-    }
-  }
-
-  const physicalData: PhysicalLayerData = {
-    bitStream: fullBinaryStream,
-    bitCount,
-    encoding: 'NRZ',
-    parityType: options.parityType,
-    parityBits,
-    corruptedBitIndices: [],
-  };
+  const ipChecksum = calculateInternetChecksum(ipBytesSample);
+  const crcResult = calculateCrc32(`${options.sourceMac}${options.destinationMac}${options.sourceIp}${options.payloadText}`);
+  const bitStream = asciiToBinary(options.payloadText).slice(0, 64) || '0100100001010100';
+  const parityRes = calculateParity(bitStream.slice(0, 8));
 
   return {
-    id: `pkt-${Date.now()}`,
+    id: 'pkt-osi-1',
     timestamp: Date.now(),
-    appData,
-    transportHeader,
-    networkHeader,
-    dataLinkHeader,
-    physicalData,
+    appData: {
+      protocol: options.appProtocol,
+      payloadText: options.payloadText,
+      payloadBytes,
+    },
+    transportHeader: {
+      protocol: options.transportProtocol,
+      sourcePort: options.sourcePort,
+      destinationPort: options.destinationPort,
+      sequenceNumber: 1048576,
+      ackNumber: 2097152,
+      flags: { syn: false, ack: true, fin: false, psh: true, rst: false },
+      windowSize: 65535,
+      checksumHex: '0x9A4C',
+      headerLengthBytes: transportHeaderLen,
+    },
+    networkHeader: {
+      version: 4,
+      ihl: 5,
+      tos: 0,
+      totalLengthBytes: ipTotalLen,
+      identification: 0x4a2f,
+      flags: { df: true, mf: false },
+      fragmentOffset: 0,
+      ttl: options.ttl,
+      protocolNumber: options.transportProtocol === 'TCP' ? 6 : 17,
+      checksumHex: ipChecksum,
+      sourceIp: options.sourceIp,
+      destinationIp: options.destinationIp,
+      headerLengthBytes: 20,
+    },
+    dataLinkHeader: {
+      preambleBytes: 8,
+      destinationMac: options.destinationMac,
+      sourceMac: options.sourceMac,
+      etherTypeHex: '0x0800',
+      headerLengthBytes: 14,
+      trailerFcsBytes: 4,
+      interFrameGapBytes: 12,
+      fcsCrc32Hex: crcResult.crc32Hex,
+    },
+    physicalData: {
+      bitStream,
+      bitCount: bitStream.length,
+      encoding: 'Manchester',
+      parityType: options.parityType,
+      parityBits: [parityRes.evenParityBit],
+    },
     currentLayer,
     isEncapsulating,
+  };
+};
+
+export const calculateBandwidthMetrics = (
+  params: BandwidthCalculationParams
+): BandwidthCalculationResult => {
+  const preambleBytes = 8;
+  const ifgBytes = 12;
+  const ethernetHeaderBytes = 14;
+  const fcsBytes = 4;
+  const totalL2OverheadBytes = preambleBytes + ifgBytes + ethernetHeaderBytes + fcsBytes; // 38B
+
+  const ipHeaderBytes = 20;
+  const transportHeaderBytes = params.transportProtocol === 'TCP' ? 20 : 8;
+  const totalHeadersBytes = ethernetHeaderBytes + fcsBytes + ipHeaderBytes + transportHeaderBytes;
+  const onWireFrameTotalBytes = preambleBytes + ifgBytes + totalHeadersBytes + params.payloadSizeBytes;
+
+  const l2EfficiencyPercent = roundTo(
+    ((params.payloadSizeBytes + ipHeaderBytes + transportHeaderBytes) / onWireFrameTotalBytes) * 100,
+    2
+  );
+  const l4PayloadEfficiencyPercent = roundTo(
+    (params.payloadSizeBytes / onWireFrameTotalBytes) * 100,
+    2
+  );
+
+  const lossFactor = Math.max(0, 1 - params.packetLossRatePercent / 100);
+  const realThroughputMbps = roundTo(params.nominalBitrateMbps * lossFactor, 2);
+  const goodputMbps = roundTo(realThroughputMbps * (l4PayloadEfficiencyPercent / 100), 2);
+  const goodputMBS = roundTo(goodputMbps / 8, 2);
+
+  const nominalBitrateBps = params.nominalBitrateMbps * 1_000_000;
+  const maxPacketsPerSecond = Math.floor(nominalBitrateBps / (onWireFrameTotalBytes * 8));
+
+  // Bandwidth-Delay Product (BDP) in Bytes = (Bitrate_bps * RTT_sec) / 8
+  const bdpBytes = Math.round((nominalBitrateBps * (params.rttMs / 1000)) / 8);
+
+  return {
+    nominalBitrateBps,
+    preambleBytes,
+    ifgBytes,
+    ethernetHeaderBytes,
+    fcsBytes,
+    totalL2OverheadBytes,
+    ipHeaderBytes,
+    transportHeaderBytes,
+    totalHeadersBytes,
+    onWireFrameTotalBytes,
+    l2EfficiencyPercent,
+    l4PayloadEfficiencyPercent,
+    realThroughputMbps,
+    goodputMbps,
+    goodputMBS,
+    maxPacketsPerSecond,
+    bdpBytes,
   };
 };

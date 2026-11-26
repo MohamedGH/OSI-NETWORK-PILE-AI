@@ -1,21 +1,18 @@
 <!doctype html>
-<html lang="fr" class="h-full bg-slate-950 text-slate-100">
+<html lang="fr" class="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Simulateur Pile Réseau & Modèle OSI</title>
-    <meta name="description" content="Visualisateur interactif de la pile réseau OSI / TCP-IP : encapsulation, en-têtes, CRC32, bits de parité, commutateurs, routeurs et analyse des débits." />
+    <meta name="description" content="Visualisateur interactif de la pile réseau OSI / TCP-IP : encapsulation, en-têtes, CRC32, bits de parité, périphériques L2/L3, contrôle de congestion TCP et fragmentation / réassemblage IP (MTU / PMTUD)." />
     <meta property="og:title" content="Simulateur Pile Réseau & Modèle OSI" />
-    <meta property="og:description" content="Visualisateur interactif de la pile réseau OSI / TCP-IP : encapsulation, en-têtes, CRC32, bits de parité, commutateurs, routeurs et analyse des débits." />
-    <meta property="og:type" content="website" />
-    <meta name="twitter:card" content="summary_large_image" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <meta property="og:description" content="Visualisateur interactif de la pile réseau OSI / TCP-IP : encapsulation, en-têtes, CRC32, bits de parité, périphériques L2/L3, contrôle de congestion TCP et fragmentation / réassemblage IP (MTU / PMTUD)." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   </head>
-  <body class="h-full antialiased selection:bg-cyan-500/30 selection:text-cyan-200">
-    <div id="root" class="h-full flex flex-col"></div>
+  <body class="bg-slate-950 text-slate-100 antialiased selection:bg-sky-500/30 selection:text-sky-200">
+    <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

@@ -1,6 +1,6 @@
 /**
- * Route Manager:
- * Handles route synchronization, active view state, tab switching, and navigation history.
+ * Route Manager
+ * Synchronizes URL hash navigation and active simulation modules.
  */
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
@@ -10,78 +10,45 @@ export interface RouteItem {
   readonly id: AppRoute;
   readonly label: string;
   readonly shortLabel: string;
-  readonly iconName: string;
   readonly description: string;
-  readonly badge?: string;
 }
 
 export const APP_ROUTES: RouteItem[] = [
   {
-    id: 'stack-journey',
-    label: 'Voyage Pile à Pile TCP/IP (Trame en Vol)',
-    shortLabel: 'Pile à Pile (Trame)',
-    iconName: 'Workflow',
-    description: 'Visualisation complète : Hôte A (L7&rarr;L1) &rarr; Câbles & Commutateurs & Routeurs &rarr; Hôte B (L1&rarr;L7).',
-    badge: 'Nouveau',
-  },
-  {
     id: 'tcp-engine',
-    label: 'Moteur TCP : Congestion, Flux & Fiabilité',
-    shortLabel: 'Contrôle TCP & Congestion',
-    iconName: 'Zap',
-    description: 'Slow Start, Évitement (AIMD), Fast Retransmit (3 Dup-ACK), SACK, Fenêtre Glissante et Flow Control.',
-    badge: 'Interactif',
-  },
-  {
-    id: 'fragmentation',
-    label: 'Fragmentation & Réassemblage IP (MTU)',
-    shortLabel: 'Fragmentation IP (MTU)',
-    iconName: 'Scissors',
-    description: 'Découpe des paquets IP par goulet MTU, drapeaux DF/MF, calcul d’offsets sur 8 octets, PMTUD et réassemblage hôte.',
-    badge: 'RFC 791',
-  },
-  {
-    id: 'osi',
-    label: 'Modèle OSI & Encapsulation',
-    shortLabel: 'OSI & PDU',
-    iconName: 'Layers',
-    description: 'Visualisation de l’encapsulation L7 à L1, en-têtes et analyse bit-à-bit.',
-  },
-  {
-    id: 'journey',
-    label: 'Traversée Réseau (Switchs & Routeurs)',
-    shortLabel: 'Équipements L2/L3',
-    iconName: 'Network',
-    description: 'Parcours d’un paquet à travers commutateurs L2 et routeurs L3 avec réécriture MAC.',
-  },
-  {
-    id: 'bandwidth',
-    label: 'Calculateur Débit, Réel & Goodput',
-    shortLabel: 'Débits & Unités',
-    iconName: 'Gauge',
-    description: 'Débit nominal vs réel vs utile (Goodput), overheads et conversions d’unités.',
+    label: 'Contrôle TCP : CUBIC, Reno, Tahoe, BBR & Fenêtre Glissante',
+    shortLabel: 'TCP CUBIC & Fenêtre',
+    description: 'Courbes de congestion W(t), comparateur multi-protocoles, fenêtre glissante et SACK.',
   },
   {
     id: 'errors',
-    label: 'Détection d’Erreurs (CRC32 & Parité)',
+    label: 'Détection d’Erreurs : CRC32 IEEE 802.3, Parité & Checksum',
     shortLabel: 'CRC32 & Parité',
-    iconName: 'ShieldAlert',
-    description: 'Calcul polynomial CRC32, bit de parité paire/impaire et injection d’erreurs.',
+    description: 'Division polynomiale CRC32 étape par étape, injection d’erreurs bit-à-bit et bits de parité.',
+  },
+  {
+    id: 'town-transit',
+    label: 'Paquet en Ville & Dorsale Inter-Ville DWDM',
+    shortLabel: 'Ville & Inter-Ville',
+    description: 'Traversée urbaine FTTH/5G et backbone national DWDM (Paris–Lyon–Marseille, EDFA, ROADM).',
+  },
+  {
+    id: 'fragmentation',
+    label: 'Fragmentation & Réassemblage IPv4 (MTU / PMTUD)',
+    shortLabel: 'Fragmentation MTU',
+    description: 'Découpe par goulet MTU, alignement sur 8 octets, drapeaux DF/MF et réassemblage hôte.',
+  },
+  {
+    id: 'osi',
+    label: 'Encapsulation OSI (L7–L1) & Calculateur Goodput',
+    shortLabel: 'OSI & Débits',
+    description: 'En-têtes L7 à L1, efficacité protocole et produit délai-bande passante (BDP).',
   },
   {
     id: 'tests',
-    label: 'Suite de Tests & Validation',
+    label: 'Validation & Tests Unitaires Automatisés',
     shortLabel: 'Tests Unitaires',
-    iconName: 'CheckCircle2',
-    description: 'Vérification automatisée de toutes les formules, protocoles et comportements.',
-    badge: 'Auto-test',
-  },
-  {
-    id: 'glossary',
-    label: 'Glossaire & Concepts Clés',
-    shortLabel: 'Glossaire',
-    iconName: 'BookOpen',
-    description: 'Fiches de révision : PDU, Trame, Paquet, Datagramme, MTU, MSS, IFG, FCS.',
+    description: 'Vérification mathématique de tous les moteurs (CUBIC, CRC32, MTU, Optique).',
   },
 ];
 
@@ -97,19 +64,18 @@ export const RouteManagerProvider: React.FC<{ children: ReactNode }> = ({ childr
   const [currentRoute, setCurrentRoute] = useState<AppRoute>(() => {
     const hash = window.location.hash.replace('#', '') as AppRoute;
     const isValid = APP_ROUTES.some(r => r.id === hash);
-    return isValid ? hash : 'osi';
+    return isValid ? hash : 'tcp-engine';
   });
 
   useEffect(() => {
-    const handleHashChange = () => {
+    const onHashChange = () => {
       const hash = window.location.hash.replace('#', '') as AppRoute;
       if (APP_ROUTES.some(r => r.id === hash)) {
         setCurrentRoute(hash);
       }
     };
-
-    window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
   const navigateTo = (route: AppRoute) => {
@@ -126,9 +92,9 @@ export const RouteManagerProvider: React.FC<{ children: ReactNode }> = ({ childr
 };
 
 export const useRouteManager = (): RouteManagerContextValue => {
-  const context = useContext(RouteManagerContext);
-  if (!context) {
+  const ctx = useContext(RouteManagerContext);
+  if (!ctx) {
     throw new Error('useRouteManager must be used within a RouteManagerProvider');
   }
-  return context;
+  return ctx;
 };

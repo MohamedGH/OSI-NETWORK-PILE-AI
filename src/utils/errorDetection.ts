@@ -1,223 +1,181 @@
 /**
- * Pure Functional Algorithms for Error Detection:
- * - CRC32 (IEEE 802.3 Ethernet standard)
- * - Bit de Parité (Paire / Impaire)
- * - Internet Checksum (RFC 1071 / IPv4 & TCP)
+ * Error Detection Engine: IEEE 802.3 Ethernet CRC32, Even/Odd Parity & RFC 1071 IPv4 Checksum
+ * Pure functional bit-level and polynomial division operations.
  */
 
-import { ParityResult, Crc32Result, CrcStep } from '../types/network';
-import { stringToBytes, byteToBinary, countOnes, toHex32 } from './functional';
+import { Crc32Result, CrcStep, ParityResult, ParityType } from '../types/network';
+import { padBinary } from './functional';
 
-/**
- * Precomputed CRC32 Table for standard IEEE 802.3 polynomial (0xEDB88320)
- */
-const CRC32_POLYNOMIAL = 0xEDB88320;
+// IEEE 802.3 reversed generator polynomial: 0xEDB88320 (normal: 0x04C11DB7)
+export const IEEE_802_3_POLY_REVERSED = 0xedb88320;
+export const IEEE_802_3_POLY_NORMAL_HEX = '0x04C11DB7';
 
-export const makeCrc32Table = (): number[] => {
+// Precomputed 256-entry IEEE 802.3 CRC32 lookup table
+const CRC32_TABLE: ReadonlyArray<number> = (() => {
   const table: number[] = new Array(256);
   for (let i = 0; i < 256; i++) {
-    let c = i;
+    let crc = i;
     for (let j = 0; j < 8; j++) {
-      if ((c & 1) !== 0) {
-        c = (c >>> 1) ^ CRC32_POLYNOMIAL;
-      } else {
-        c = c >>> 1;
-      }
+      crc = (crc & 1) !== 0 ? (crc >>> 1) ^ IEEE_802_3_POLY_REVERSED : crc >>> 1;
     }
-    table[i] = c >>> 0;
+    table[i] = crc >>> 0;
   }
   return table;
+})();
+
+export const asciiToBinary = (text: string): string => {
+  if (!text) return '';
+  return Array.from(text)
+    .map(ch => padBinary(ch.charCodeAt(0) & 0xff, 8))
+    .join('');
 };
 
-const CRC32_TABLE = makeCrc32Table();
+export const asciiToHex = (text: string): string => {
+  if (!text) return '0x00';
+  return (
+    '0x' +
+    Array.from(text)
+      .map(ch => (ch.charCodeAt(0) & 0xff).toString(16).toUpperCase().padStart(2, '0'))
+      .join('')
+  );
+};
 
 /**
- * Pure functional calculation of CRC32 over arbitrary bytes array
+ * Calculates standard IEEE 802.3 CRC32 with step-by-step byte trace
+ * Standard test vector: calculateCrc32("123456789").crc32Hex === "0xCBF43926"
  */
-export const calculateCrc32Bytes = (bytes: number[]): number => {
+export const calculateCrc32 = (inputAscii: string, corruptedBits: number[] = []): Crc32Result => {
+  if (inputAscii.length === 0) {
+    return {
+      inputAscii: '',
+      inputBinary: '',
+      inputHex: '0x00',
+      polynomialHex: IEEE_802_3_POLY_NORMAL_HEX,
+      crc32Hex: '0x00000000',
+      crc32Binary: '0'.repeat(32),
+      crc32Int: 0,
+      isValid: true,
+      byteSteps: [],
+    };
+  }
+
+  let rawBinary = asciiToBinary(inputAscii);
+  if (corruptedBits.length > 0) {
+    rawBinary = injectBitFlips(rawBinary, corruptedBits);
+  }
+
+  // Reconstruct byte array from (possibly flipped) binary stream
+  const bytes: number[] = [];
+  for (let i = 0; i < rawBinary.length; i += 8) {
+    const byteSlice = rawBinary.slice(i, i + 8);
+    bytes.push(parseInt(byteSlice.padEnd(8, '0'), 2) & 0xff);
+  }
+
   let crc = 0xffffffff;
+  const byteSteps: CrcStep[] = [];
+
   for (let i = 0; i < bytes.length; i++) {
-    const byte = bytes[i] & 0xff;
-    const tableIndex = (crc ^ byte) & 0xff;
-    crc = (crc >>> 8) ^ CRC32_TABLE[tableIndex];
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-};
+    const b = bytes[i];
+    const beforeHex = '0x' + (crc >>> 0).toString(16).toUpperCase().padStart(8, '0');
+    const lookupIdx = (crc ^ b) & 0xff;
+    const polyApplied = (lookupIdx & 1) !== 0;
+    crc = (crc >>> 8) ^ CRC32_TABLE[lookupIdx];
+    const afterHex = '0x' + (crc >>> 0).toString(16).toUpperCase().padStart(8, '0');
 
-/**
- * Calculate CRC32 for a string input with rich diagnostic metadata
- */
-export const calculateCrc32 = (input: string): Crc32Result => {
-  const bytes = stringToBytes(input);
-  const crcInt = calculateCrc32Bytes(bytes);
-  const crcHex = toHex32(crcInt);
-  const crc32Binary = (crcInt >>> 0).toString(2).padStart(32, '0');
-  const inputBinary = bytes.map(b => byteToBinary(b)).join(' ');
-  const inputHex = bytes.map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
-
-  return {
-    inputAscii: input,
-    inputBinary,
-    inputHex,
-    polynomialHex: '0xEDB88320 (IEEE 802.3 Ethernet)',
-    crc32Hex: crcHex,
-    crc32Binary,
-    crc32Int: crcInt,
-    isValid: true,
-    detailedStepsCount: bytes.length * 8,
-  };
-};
-
-/**
- * Generate step-by-step bitwise CRC division for visual education
- * (Uses simplified 8-bit / 16-bit generator polynomial for clear visual rendering)
- */
-export const generateCrcToySteps = (inputBinary: string, generatorBinary: string = '10011'): {
-  readonly steps: CrcStep[];
-  readonly finalRemainder: string;
-} => {
-  const genLen = generatorBinary.length;
-  // Pad data with (genLen - 1) zeros
-  const paddedInput = inputBinary.replace(/\s+/g, '') + '0'.repeat(genLen - 1);
-  const steps: CrcStep[] = [];
-  
-  let currentRemainder = paddedInput.slice(0, genLen);
-  let pointer = genLen;
-
-  while (pointer <= paddedInput.length) {
-    const isLeadingOne = currentRemainder[0] === '1';
-    const quotientBit = isLeadingOne ? '1' : '0';
-    
-    // XOR with generator if leading bit is 1, else XOR with 0
-    let xorResult = '';
-    if (isLeadingOne) {
-      for (let i = 0; i < genLen; i++) {
-        xorResult += currentRemainder[i] === generatorBinary[i] ? '0' : '1';
-      }
-    } else {
-      xorResult = currentRemainder;
-    }
-
-    // Drop leading bit and pull down next bit
-    const nextBit = pointer < paddedInput.length ? paddedInput[pointer] : '';
-    const newRemainder = xorResult.slice(1) + (nextBit !== '' ? nextBit : '');
-
-    steps.push({
-      step: steps.length + 1,
-      remainderBinary: currentRemainder,
-      currentBit: nextBit,
-      quotientBit,
-      xorApplied: isLeadingOne,
+    byteSteps.push({
+      step: i + 1,
+      byteIndex: i,
+      byteHex: '0x' + b.toString(16).toUpperCase().padStart(2, '0'),
+      crcBeforeHex: beforeHex,
+      crcAfterHex: afterHex,
+      polynomialApplied: polyApplied,
     });
-
-    currentRemainder = newRemainder;
-    pointer++;
   }
 
+  const finalCrc = (crc ^ 0xffffffff) >>> 0;
+  const crc32Hex = '0x' + finalCrc.toString(16).toUpperCase().padStart(8, '0');
+  const crc32Binary = padBinary(finalCrc, 32);
+
+  // Check against uncorrupted reference
+  const cleanRef = corruptedBits.length > 0 ? calculateCrc32(inputAscii, []) : null;
+  const isValid = cleanRef ? cleanRef.crc32Hex === crc32Hex : true;
+
   return {
-    steps: steps.slice(0, 30), // limit to first 30 steps for UI performance
-    finalRemainder: currentRemainder.slice(0, genLen - 1),
+    inputAscii,
+    inputBinary: rawBinary,
+    inputHex: asciiToHex(inputAscii),
+    polynomialHex: IEEE_802_3_POLY_NORMAL_HEX,
+    crc32Hex,
+    crc32Binary,
+    crc32Int: finalCrc,
+    isValid,
+    byteSteps,
   };
 };
 
 /**
- * Pure calculation of Parity bit (Even & Odd)
+ * Injects bit flips at specified 0-based indices
+ */
+export const injectBitFlips = (binaryStr: string, flipIndices: number[]): string => {
+  if (!binaryStr || flipIndices.length === 0) return binaryStr;
+  const flipSet = new Set(flipIndices);
+  return Array.from(binaryStr)
+    .map((bit, idx) => (flipSet.has(idx) ? (bit === '1' ? '0' : '1') : bit))
+    .join('');
+};
+
+/**
+ * Calculates Even and Odd Parity for a binary bit string
  */
 export const calculateParity = (binaryInput: string): ParityResult => {
-  const cleanBinary = binaryInput.replace(/[^01]/g, '');
-  const ones = countOnes(cleanBinary);
-  
-  // Parité Paire (Even): total de '1' doit être pair.
-  // Si ones est impair, on met 1, sinon 0.
-  const evenBit: '0' | '1' = ones % 2 === 0 ? '0' : '1';
+  const cleanBits = binaryInput.replace(/[^01]/g, '') || '0';
+  const onesCount = Array.from(cleanBits).filter(b => b === '1').length;
 
-  // Parité Impaire (Odd): total de '1' doit être impair.
-  // Si ones est pair, on met 1, sinon 0.
-  const oddBit: '0' | '1' = ones % 2 === 0 ? '1' : '0';
+  // Even parity bit ensures total number of 1s (including parity bit) is even
+  const evenParityBit: '0' | '1' = onesCount % 2 === 0 ? '0' : '1';
+  // Odd parity bit ensures total number of 1s (including parity bit) is odd
+  const oddParityBit: '0' | '1' = onesCount % 2 === 0 ? '1' : '0';
 
-  const encodedEven = cleanBinary + evenBit;
-  const encodedOdd = cleanBinary + oddBit;
+  const encodedEven = cleanBits + evenParityBit;
+  const encodedOdd = cleanBits + oddParityBit;
 
-  // Validation
-  const isValidEven = countOnes(encodedEven) % 2 === 0;
-  const isValidOdd = countOnes(encodedOdd) % 2 === 1;
+  const totalEvenOnes = Array.from(encodedEven).filter(b => b === '1').length;
+  const totalOddOnes = Array.from(encodedOdd).filter(b => b === '1').length;
 
   return {
-    inputBinary: cleanBinary,
-    onesCount: ones,
-    evenParityBit: evenBit,
-    oddParityBit: oddBit,
+    inputBinary: cleanBits,
+    onesCount,
+    evenParityBit,
+    oddParityBit,
     encodedEven,
     encodedOdd,
-    isValidEven,
-    isValidOdd,
+    isValidEven: totalEvenOnes % 2 === 0,
+    isValidOdd: totalOddOnes % 2 === 1,
   };
 };
 
 /**
- * Check parity on a received stream with trailing parity bit
+ * Verifies whether an encoded parity block passes parity check
+ * Note: 1-bit flip is detected, 2-bit flip goes undetected (limitation of single parity bit)
  */
-export const verifyParityStream = (
-  stream: string,
-  parityType: 'even' | 'odd'
-): { isValid: boolean; onesCount: number; expectedParity: string; actualParity: string } => {
-  const clean = stream.replace(/[^01]/g, '');
-  if (clean.length === 0) {
-    return { isValid: false, onesCount: 0, expectedParity: '0', actualParity: '0' };
-  }
-  const dataBits = clean.slice(0, -1);
-  const actualParity = clean.slice(-1);
-  const ones = countOnes(dataBits);
-
-  const expectedParity = parityType === 'even'
-    ? (ones % 2 === 0 ? '0' : '1')
-    : (ones % 2 === 0 ? '1' : '0');
-
-  return {
-    isValid: actualParity === expectedParity,
-    onesCount: ones,
-    expectedParity,
-    actualParity,
-  };
+export const verifyParityCodeword = (codeword: string, parityType: ParityType): boolean => {
+  if (parityType === 'none') return true;
+  const ones = Array.from(codeword).filter(b => b === '1').length;
+  return parityType === 'even' ? ones % 2 === 0 : ones % 2 === 1;
 };
 
 /**
- * RFC 1071 Internet Checksum (One's complement 16-bit sum)
- * Used in IPv4 headers, TCP, and UDP
+ * Calculates RFC 1071 16-bit one's complement Internet Checksum (used in IPv4, TCP, UDP headers)
  */
-export const calculateInternetChecksum = (bytes: number[]): number => {
+export const calculateInternetChecksum = (bytes: number[]): string => {
   let sum = 0;
-  const length = bytes.length;
-
-  // Sum 16-bit words
-  for (let i = 0; i < length - 1; i += 2) {
-    const word = ((bytes[i] & 0xff) << 8) | (bytes[i + 1] & 0xff);
+  for (let i = 0; i < bytes.length; i += 2) {
+    const word = ((bytes[i] & 0xff) << 8) | ((bytes[i + 1] ?? 0) & 0xff);
     sum += word;
-  }
-
-  // If odd length, pad with trailing 0
-  if (length % 2 === 1) {
-    sum += (bytes[length - 1] & 0xff) << 8;
-  }
-
-  // Fold 32-bit sum to 16 bits (carry addition)
-  while ((sum >>> 16) > 0) {
-    sum = (sum & 0xffff) + (sum >>> 16);
-  }
-
-  // Invert (One's complement)
-  return (~sum & 0xffff) >>> 0;
-};
-
-/**
- * Inject random bit errors or specific bit flips for simulation
- */
-export const injectBitFlips = (binaryString: string, flipIndices: number[]): string => {
-  const bits = binaryString.split('');
-  flipIndices.forEach(idx => {
-    if (idx >= 0 && idx < bits.length && (bits[idx] === '0' || bits[idx] === '1')) {
-      bits[idx] = bits[idx] === '0' ? '1' : '0';
+    while (sum > 0xffff) {
+      sum = (sum & 0xffff) + (sum >>> 16);
     }
-  });
-  return bits.join('');
+  }
+  const complement = (~sum) & 0xffff;
+  return '0x' + complement.toString(16).toUpperCase().padStart(4, '0');
 };

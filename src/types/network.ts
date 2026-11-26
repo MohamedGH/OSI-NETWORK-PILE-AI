@@ -1,5 +1,6 @@
 /**
- * Network Simulation & OSI Model Types
+ * Network Simulation, TCP Congestion (CUBIC, Reno, Tahoe, BBR), Sliding Window,
+ * CRC32, IP Fragmentation (MTU), OSI Stack, and Town / Inter-City Transit Types
  */
 
 export type OsiLayerNumber = 7 | 6 | 5 | 4 | 3 | 2 | 1;
@@ -8,12 +9,8 @@ export interface OsiLayerInfo {
   readonly layer: OsiLayerNumber;
   readonly nameFr: string;
   readonly nameEn: string;
-  readonly pduName: string; // e.g. "Donnée", "Segment", "Paquet", "Trame", "Bits"
-  readonly color: string;
-  readonly borderClass: string;
-  readonly bgClass: string;
-  readonly textClass: string;
-  readonly badgeClass: string;
+  readonly pduName: string;
+  readonly accentColor: string;
   readonly descriptionFr: string;
   readonly keyProtocols: string[];
   readonly typicalEquipment: string;
@@ -22,20 +19,20 @@ export interface OsiLayerInfo {
 
 export type TransportProtocol = 'TCP' | 'UDP';
 export type ApplicationProtocol = 'HTTP' | 'DNS' | 'ICMP_ECHO' | 'CUSTOM';
+export type ParityType = 'even' | 'odd' | 'none';
 
 export interface ApplicationData {
   readonly protocol: ApplicationProtocol;
   readonly payloadText: string;
   readonly payloadBytes: number;
-  readonly mimeType?: string;
 }
 
 export interface TransportHeader {
   readonly protocol: TransportProtocol;
   readonly sourcePort: number;
   readonly destinationPort: number;
-  readonly sequenceNumber: number; // For TCP
-  readonly ackNumber: number; // For TCP
+  readonly sequenceNumber: number;
+  readonly ackNumber: number;
   readonly flags: {
     readonly syn: boolean;
     readonly ack: boolean;
@@ -43,51 +40,47 @@ export interface TransportHeader {
     readonly psh: boolean;
     readonly rst: boolean;
   };
-  readonly windowSize: number; // For TCP (bytes)
+  readonly windowSize: number;
   readonly checksumHex: string;
-  readonly headerLengthBytes: number; // 20 for TCP min, 8 for UDP
+  readonly headerLengthBytes: number;
 }
 
 export interface NetworkHeader {
   readonly version: 4;
-  readonly ihl: number; // Internet Header Length (words of 32 bits, default 5 = 20B)
-  readonly tos: number; // Type of service / DSCP
+  readonly ihl: number;
+  readonly tos: number;
   readonly totalLengthBytes: number;
   readonly identification: number;
   readonly flags: {
-    readonly df: boolean; // Don't Fragment
-    readonly mf: boolean; // More Fragments
+    readonly df: boolean;
+    readonly mf: boolean;
   };
   readonly fragmentOffset: number;
-  readonly ttl: number; // Time to Live
-  readonly protocolNumber: number; // 6 = TCP, 17 = UDP, 1 = ICMP
+  readonly ttl: number;
+  readonly protocolNumber: number;
   readonly checksumHex: string;
   readonly sourceIp: string;
   readonly destinationIp: string;
-  readonly headerLengthBytes: number; // 20 standard
+  readonly headerLengthBytes: number;
 }
 
 export interface DataLinkHeader {
-  readonly preambleBytes: number; // 7 bytes preamble + 1 byte SFD = 8B
+  readonly preambleBytes: number;
   readonly destinationMac: string;
   readonly sourceMac: string;
-  readonly etherTypeHex: string; // 0x0800 for IPv4, 0x0806 for ARP
-  readonly headerLengthBytes: number; // 14 bytes (6 MAC dest + 6 MAC src + 2 Type)
-  readonly trailerFcsBytes: number; // 4 bytes (CRC32)
-  readonly interFrameGapBytes: number; // 12 bytes standard Ethernet IFG
+  readonly etherTypeHex: string;
+  readonly headerLengthBytes: number;
+  readonly trailerFcsBytes: number;
+  readonly interFrameGapBytes: number;
   readonly fcsCrc32Hex: string;
-  readonly isCorrupted?: boolean;
 }
 
-export type ParityType = 'even' | 'odd' | 'none';
-
 export interface PhysicalLayerData {
-  readonly bitStream: string; // raw string of '0' and '1'
+  readonly bitStream: string;
   readonly bitCount: number;
   readonly encoding: 'NRZ' | 'Manchester' | 'MLT-3';
   readonly parityType: ParityType;
-  readonly parityBits: string[]; // Parity bit calculated per byte/block
-  readonly corruptedBitIndices: number[];
+  readonly parityBits: string[];
 }
 
 export interface EncapsulatedPacket {
@@ -99,7 +92,7 @@ export interface EncapsulatedPacket {
   readonly dataLinkHeader: DataLinkHeader;
   readonly physicalData: PhysicalLayerData;
   readonly currentLayer: OsiLayerNumber;
-  readonly isEncapsulating: boolean; // true = down stack, false = up stack
+  readonly isEncapsulating: boolean;
 }
 
 export interface PacketBuilderOptions {
@@ -116,207 +109,23 @@ export interface PacketBuilderOptions {
   readonly parityType: ParityType;
 }
 
-// Network Topology & Journey Types
-export type DeviceType = 'HOST' | 'SWITCH' | 'ROUTER' | 'SERVER';
+// ========================================================
+// TCP Congestion (CUBIC, Reno, Tahoe, BBR) & Sliding Window
+// ========================================================
 
-export interface NetworkDevice {
-  readonly id: string;
-  readonly name: string;
-  readonly type: DeviceType;
-  readonly osiLayerMax: 2 | 3 | 7;
-  readonly ipAddress?: string;
-  readonly macAddress: string;
-  readonly interfaces: Array<{
-    readonly portName: string;
-    readonly ip?: string;
-    readonly mac: string;
-    readonly connectedToDeviceId?: string;
-  }>;
-  readonly macTable?: Record<string, string>; // Switch: MAC -> Port
-  readonly routingTable?: Array<{
-    readonly destinationNet: string;
-    readonly netmask: string;
-    readonly nextHop: string;
-    readonly interfaceName: string;
-  }>;
-}
-
-export interface NetworkHop {
-  readonly stepIndex: number;
-  readonly fromDeviceId: string;
-  readonly toDeviceId: string;
-  readonly deviceProcessingId: string;
-  readonly descriptionFr: string;
-  readonly layerInspected: OsiLayerNumber;
-  readonly actionType: 'GENERATE' | 'L2_COMMUTATION' | 'L3_ROUTING' | 'RECEPTION' | 'ERROR_DROP';
-  readonly beforeHeaders: {
-    readonly srcMac: string;
-    readonly dstMac: string;
-    readonly srcIp: string;
-    readonly dstIp: string;
-    readonly ttl: number;
-    readonly crc32: string;
-  };
-  readonly afterHeaders: {
-    readonly srcMac: string;
-    readonly dstMac: string;
-    readonly srcIp: string;
-    readonly dstIp: string;
-    readonly ttl: number;
-    readonly crc32: string;
-  };
-  readonly explanationFr: string[];
-}
-
-// Bandwidth & Throughput Types
-export interface BandwidthCalculationParams {
-  readonly nominalBitrateMbps: number; // e.g., 100 Mbps, 1000 Mbps (1 Gbps)
-  readonly payloadSizeBytes: number; // e.g. 1460 bytes (MSS)
-  readonly mtuBytes: number; // e.g. 1500 bytes standard Ethernet
-  readonly transportProtocol: TransportProtocol;
-  readonly packetLossRatePercent: number; // 0 to 100%
-  readonly rttMs: number; // Round Trip Time
-  readonly windowSizeBytes: number; // TCP Window Size (e.g. 64KB)
-  readonly enableJumboFrames: boolean; // 9000 bytes
-  readonly useBinaryUnits: boolean; // MiB vs MB
-}
-
-export interface BandwidthCalculationResult {
-  readonly nominalBitrateBps: number;
-  readonly nominalBitrateFormatted: string;
-  
-  // Per packet byte breakdown
-  readonly preambleBytes: number; // 8B
-  readonly ifgBytes: number; // 12B
-  readonly ethernetHeaderBytes: number; // 14B
-  readonly fcsBytes: number; // 4B
-  readonly totalL2OverheadBytes: number; // 38B
-  
-  readonly ipHeaderBytes: number; // 20B
-  readonly transportHeaderBytes: number; // 20B for TCP, 8B for UDP
-  readonly totalHeadersBytes: number; // L2(14) + L3(20) + L4(20/8) + FCS(4) = 58/46 B
-  readonly onWireFrameTotalBytes: number; // Preamble(8) + IFG(12) + Eth(14) + IP(20) + L4(20/8) + Payload + FCS(4)
-  
-  // Efficiencies
-  readonly l2EfficiencyPercent: number;
-  readonly l4PayloadEfficiencyPercent: number; // Goodput efficiency
-  
-  // Throughputs
-  readonly realThroughputMbps: number; // Physical wire throughput considering channel/losses
-  readonly goodputMbps: number; // Actual application data delivered
-  readonly goodputMBS: number; // MegaBytes / second (MB/s)
-  readonly goodputMibS: number; // MebiBytes / second (MiB/s)
-  
-  readonly maxPacketsPerSecond: number;
-  readonly timeToTransfer100MBSeconds: number;
-  readonly timeToTransfer1GBSeconds: number;
-}
-
-// Error Detection Types
-export interface ParityResult {
-  readonly inputBinary: string;
-  readonly onesCount: number;
-  readonly evenParityBit: '0' | '1';
-  readonly oddParityBit: '0' | '1';
-  readonly encodedEven: string;
-  readonly encodedOdd: string;
-  readonly isValidEven: boolean;
-  readonly isValidOdd: boolean;
-}
-
-export interface CrcStep {
-  readonly step: number;
-  readonly remainderBinary: string;
-  readonly currentBit: string;
-  readonly quotientBit: string;
-  readonly xorApplied: boolean;
-}
-
-export interface Crc32Result {
-  readonly inputAscii: string;
-  readonly inputBinary: string;
-  readonly inputHex: string;
-  readonly polynomialHex: string; // 0xEDB88320 (reversed) or 0x04C11DB7
-  readonly crc32Hex: string;
-  readonly crc32Binary: string;
-  readonly crc32Int: number;
-  readonly isValid: boolean;
-  readonly detailedStepsCount: number;
-}
-
-// Route Type
-export type AppRoute = 'osi' | 'stack-journey' | 'tcp-engine' | 'fragmentation' | 'journey' | 'bandwidth' | 'errors' | 'tests' | 'glossary';
-
-// IP Fragmentation & Reassembly Types (RFC 791 / RFC 1191)
-export interface IpFragment {
-  readonly fragmentIndex: number;
-  readonly totalFragments: number;
-  readonly identification: number;
-  readonly totalLength: number; // Header (20B) + fragment payload
-  readonly headerLength: number; // typically 20B
-  readonly payloadLength: number; // bytes in this fragment
-  readonly df: boolean; // Don't Fragment flag (0 or 1)
-  readonly mf: boolean; // More Fragments flag (1 except last)
-  readonly fragmentOffset: number; // In 8-byte units (e.g., 0, 185, 370)
-  readonly byteRangeStart: number; // In raw payload bytes (e.g. 0, 1480)
-  readonly byteRangeEnd: number; // In raw payload bytes (e.g. 1479, 2959)
-  readonly payloadText: string;
-  readonly ttl: number;
-  readonly protocol: 'TCP' | 'UDP' | 'ICMP';
-  readonly sourceIp: string;
-  readonly destinationIp: string;
-  readonly status: 'PENDING' | 'IN_FLIGHT' | 'RECEIVED' | 'CORRUPTED' | 'DROPPED';
-  readonly arrivalOrder?: number;
-}
-
-export interface IcmpFragNeededMessage {
-  readonly type: number; // 3 = Destination Unreachable
-  readonly code: number; // 4 = Fragmentation Needed and DF was Set
-  readonly nextHopMtu: number;
-  readonly routerIp: string;
-  readonly description: string;
-  readonly pmtudSuggestedMtu: number;
-}
-
-export interface IpFragmentationPlan {
-  readonly originalPacketSize: number; // IP total length (e.g. 4000B)
-  readonly originalPayloadSize: number; // e.g. 3980B
-  readonly ingressMtu: number; // e.g. 1500B
-  readonly bottleneckMtu: number; // e.g. 576B, 1000B
-  readonly identification: number;
-  readonly isDfSet: boolean;
-  readonly isDroppedDueToDf: boolean;
-  readonly maxFragmentDataSize: number; // (bottleneckMtu - 20) rounded down to mult of 8
-  readonly fragments: IpFragment[];
-  readonly totalFragmentsCount: number;
-  readonly totalOverheadBytes: number;
-  readonly efficiencyPercentage: number;
-  readonly icmpError?: IcmpFragNeededMessage;
-}
-
-export interface ReassemblyBufferState {
-  readonly expectedTotalPayloadBytes: number;
-  readonly receivedPayloadBytes: number;
-  readonly receivedFragments: IpFragment[];
-  readonly missingByteRanges: Array<{ start: number; end: number }>;
-  readonly isComplete: boolean;
-  readonly isTimedOut: boolean;
-  readonly reassembledPayload: string | null;
-  readonly timerSecondsRemaining: number;
-  readonly logMessages: string[];
-}
-
-// TCP Congestion & Reliability Types
-export type TcpAlgorithm = 'RENO' | 'TAHOE' | 'CUBIC' | 'BBR';
-export type TcpCongestionPhase = 'SLOW_START' | 'CONGESTION_AVOIDANCE' | 'FAST_RECOVERY' | 'TIMEOUT_RTO';
+export type TcpAlgorithm = 'CUBIC' | 'RENO' | 'TAHOE' | 'BBR';
+export type TcpCongestionPhase = 'SLOW_START' | 'CONGESTION_AVOIDANCE' | 'FAST_RECOVERY' | 'TIMEOUT_RTO' | 'BBR_PROBE_BW';
 
 export interface TcpRttDataPoint {
   readonly rttIndex: number;
   readonly cwndMss: number;
   readonly ssthreshMss: number;
+  readonly rwndMss: number;
+  readonly effectiveWindowMss: number;
   readonly phase: TcpCongestionPhase;
   readonly eventDescription: string;
   readonly isLossEvent?: boolean;
+  readonly wMaxMss?: number;
 }
 
 export type TcpSegmentStatus = 'ACKED' | 'IN_FLIGHT' | 'USABLE_WINDOW' | 'BLOCKED_OUTSIDE';
@@ -330,7 +139,12 @@ export interface TcpSegmentBlock {
   readonly isRetransmitted?: boolean;
 }
 
-export type TcpScenarioTab = 'CONGESTION_GRAPH' | 'SLIDING_WINDOW' | 'FAST_RETRANSMIT' | 'SACK_SIMULATION' | 'FLOW_CONTROL_RWND' | 'HANDSHAKE';
+export type TcpScenarioTab =
+  | 'CONGESTION_GRAPH'
+  | 'SLIDING_WINDOW'
+  | 'ALGO_COMPARATOR'
+  | 'FAST_RETRANSMIT_SACK'
+  | 'FLOW_CONTROL_RWND';
 
 export interface TcpLossScenarioStep {
   readonly stepNumber: number;
@@ -338,72 +152,305 @@ export interface TcpLossScenarioStep {
   readonly senderAction: string;
   readonly inFlightPackets: number[];
   readonly receiverAction: string;
-  readonly ackGenerated: { ackNum: number; isDup: boolean; dupCount: number; sackBlocks?: string };
+  readonly ackGenerated: {
+    readonly ackNum: number;
+    readonly isDup: boolean;
+    readonly dupCount: number;
+    readonly sackBlocks?: string;
+  };
   readonly technicalInsight: string;
 }
 
-// Stack-to-Stack Visualizer Types
-export type StackJourneyPhase = 'HOST_A_ENCAPSULATION' | 'NETWORK_TRANSIT' | 'HOST_B_DECAPSULATION';
+// ========================================================
+// CRC32, Parity & Checksum Error Detection Types
+// ========================================================
 
-export interface WireTrameSlice {
+export interface ParityResult {
+  readonly inputBinary: string;
+  readonly onesCount: number;
+  readonly evenParityBit: '0' | '1';
+  readonly oddParityBit: '0' | '1';
+  readonly encodedEven: string;
+  readonly encodedOdd: string;
+  readonly isValidEven: boolean;
+  readonly isValidOdd: boolean;
+}
+
+export interface CrcStep {
+  readonly step: number;
+  readonly byteIndex: number;
+  readonly byteHex: string;
+  readonly crcBeforeHex: string;
+  readonly crcAfterHex: string;
+  readonly polynomialApplied: boolean;
+}
+
+export interface Crc32Result {
+  readonly inputAscii: string;
+  readonly inputBinary: string;
+  readonly inputHex: string;
+  readonly polynomialHex: string;
+  readonly crc32Hex: string;
+  readonly crc32Binary: string;
+  readonly crc32Int: number;
+  readonly isValid: boolean;
+  readonly byteSteps: CrcStep[];
+}
+
+// ========================================================
+// IP Fragmentation & Reassembly (RFC 791 / PMTUD)
+// ========================================================
+
+export interface IpFragment {
+  readonly fragmentIndex: number;
+  readonly totalFragments: number;
+  readonly identification: number;
+  readonly totalLength: number;
+  readonly headerLength: number;
+  readonly payloadLength: number;
+  readonly df: boolean;
+  readonly mf: boolean;
+  readonly fragmentOffset: number;
+  readonly byteRangeStart: number;
+  readonly byteRangeEnd: number;
+  readonly payloadText: string;
+  readonly ttl: number;
+  readonly protocol: 'TCP' | 'UDP' | 'ICMP';
+  readonly sourceIp: string;
+  readonly destinationIp: string;
+  readonly status: 'PENDING' | 'IN_FLIGHT' | 'RECEIVED' | 'DROPPED';
+}
+
+export interface IcmpFragNeededMessage {
+  readonly type: number;
+  readonly code: number;
+  readonly nextHopMtu: number;
+  readonly routerIp: string;
+  readonly description: string;
+  readonly pmtudSuggestedMtu: number;
+}
+
+export interface IpFragmentationPlan {
+  readonly originalPacketSize: number;
+  readonly originalPayloadSize: number;
+  readonly ingressMtu: number;
+  readonly bottleneckMtu: number;
+  readonly identification: number;
+  readonly isDfSet: boolean;
+  readonly isDroppedDueToDf: boolean;
+  readonly maxFragmentDataSize: number;
+  readonly fragments: IpFragment[];
+  readonly totalFragmentsCount: number;
+  readonly totalOverheadBytes: number;
+  readonly efficiencyPercentage: number;
+  readonly icmpError?: IcmpFragNeededMessage;
+}
+
+export interface ReassemblyBufferState {
+  readonly expectedTotalPayloadBytes: number;
+  readonly receivedPayloadBytes: number;
+  readonly receivedFragments: IpFragment[];
+  readonly missingByteRanges: Array<{ readonly start: number; readonly end: number }>;
+  readonly isComplete: boolean;
+  readonly isTimedOut: boolean;
+  readonly reassembledPayload: string | null;
+  readonly timerSecondsRemaining: number;
+  readonly logMessages: string[];
+}
+
+// ========================================================
+// Intra-Town & Inter-City (Inter-Ville) Transit Types
+// ========================================================
+
+export type TownSimulationScope = 'INTRA_TOWN' | 'INTER_CITIES' | 'GLOBAL_SEAMLESS';
+
+export type TownNodeType =
+  | 'SMART_HOME'
+  | 'MANHOLE_TELECOM'
+  | 'STREET_CABINET'
+  | 'CELL_TOWER_5G'
+  | 'RIVER_SIPHON'
+  | 'METRO_POP'
+  | 'MUNICIPAL_DATACENTER';
+
+export type TownMediumType =
+  | 'WIFI_6_RADIO'
+  | 'G652_SINGLEMODE_FIBER'
+  | 'MICROWAVE_5G'
+  | 'SUBMARINE_RIVER_FIBER'
+  | 'CAT6A_COPPER'
+  | 'DWDM_LONG_HAUL';
+
+export type TownIncidentType =
+  | 'NONE'
+  | 'FIBER_CUT'
+  | 'RAIN_STORM'
+  | 'RUSH_HOUR'
+  | 'TGV_FIBER_CUT'
+  | 'EDFA_PUMP_FAIL';
+
+export type TownPacketType =
+  | 'HTTP_GET'
+  | 'STREAM_4K'
+  | 'ICMP_PING'
+  | 'IOT_TELEMETRY'
+  | 'VOIP_CALL';
+
+export interface TownNode {
+  readonly id: string;
+  readonly label: string;
+  readonly districtName: string;
+  readonly type: TownNodeType;
+  readonly x: number;
+  readonly y: number;
+  readonly osiLayer: OsiLayerNumber;
+  readonly ipAddress?: string;
+  readonly macAddress?: string;
+  readonly status: 'ONLINE' | 'CONGESTED' | 'DISRUPTED';
+  readonly equipmentModel: string;
+  readonly queueLoadPercent: number;
+  readonly opticalPowerDbm: number;
+  readonly temperatureC: number;
+  readonly descriptionFr: string;
+}
+
+export interface TownLink {
+  readonly id: string;
+  readonly fromNodeId: string;
+  readonly toNodeId: string;
+  readonly mediumType: TownMediumType;
+  readonly mediumNameFr: string;
+  readonly distanceMeters: number;
+  readonly propagationSpeedKmS: number;
+  readonly nominalBitrateGbps: number;
+  readonly attenuationDbPerKm: number;
+  readonly isBackupRoute: boolean;
+  readonly isSubterranean: boolean;
+  readonly isWireless: boolean;
+  readonly waypoints: Array<{ readonly x: number; readonly y: number }>;
+  readonly descriptionFr: string;
+}
+
+export interface InterCityNode {
   readonly id: string;
   readonly name: string;
-  readonly byteSize: number;
-  readonly byteRange: string;
-  readonly hexSample: string;
-  readonly colorClass: string;
-  readonly layerLevel: 'L1' | 'L2' | 'L3' | 'L4' | 'L7' | 'TRAILER';
-  readonly description: string;
-  readonly isAddedAtThisStep?: boolean;
-  readonly isModifiedAtThisStep?: boolean;
-  readonly isRemovedAtThisStep?: boolean;
+  readonly regionName: string;
+  readonly role: 'NATIONAL_IXP' | 'REGIONAL_POP' | 'SUBMARINE_LANDING' | 'OPTICAL_AMPLIFIER_SHELTER';
+  readonly x: number;
+  readonly y: number;
+  readonly bgpAsNumber: number;
+  readonly asName: string;
+  readonly dwdmCapacityTbps: number;
+  readonly activeWavelengths: number;
+  readonly edfaGainDb: number;
+  readonly osnrDb: number;
+  readonly descriptionFr: string;
 }
 
-export interface StackToStackStep {
-  readonly stepNumber: number; // 1 to 10
-  readonly phase: StackJourneyPhase;
-  readonly title: string;
-  readonly subtitle: string;
-  readonly locationBadge: string;
-  
-  // Layer highlights
-  readonly activeHostALayer: OsiLayerNumber | null;
-  readonly activeHostBLayer: OsiLayerNumber | null;
-  readonly activeTransitNodeId: string | null; // e.g. 'pc1', 'cable-1', 'sw1', 'cable-2', 'r1', 'cable-3', 'sw2', 'cable-4', 'server1'
-  readonly pduName: string; // Message, Segment TCP, Paquet IP, Trame Ethernet, Bits
-  
-  // Live Frame state on wire / memory
-  readonly frameSummary: {
-    readonly srcMac: string;
-    readonly dstMac: string;
-    readonly srcIp: string;
-    readonly dstIp: string;
-    readonly srcPort: number;
-    readonly dstPort: number;
-    readonly ttl: number;
-    readonly fcsCrc32Hex: string;
-    readonly totalBytesOnWire: number;
-    readonly isCrcValid: boolean;
-  };
-  
-  // Detailed explanation bullet points
-  readonly keyActions: string[];
-  readonly technicalDeepDive: string;
-  
-  // Trame byte breakdown
-  readonly trameSlices: WireTrameSlice[];
+export interface InterCityLink {
+  readonly id: string;
+  readonly fromCityId: string;
+  readonly toCityId: string;
+  readonly nameFr: string;
+  readonly infraType: 'TGV_RAILWAY_FIBER' | 'HIGHWAY_CONDUIT' | 'RTE_HIGH_VOLTAGE_OPGW' | 'SUBSEA_MEDITERRANEAN';
+  readonly distanceKm: number;
+  readonly fiberStandard: string;
+  readonly dwdmCapacityTbps: number;
+  readonly edfaAmplifiersCount: number;
+  readonly propagationSpeedKmS: number;
+  readonly isBackupRing: boolean;
+  readonly waypoints: Array<{ readonly x: number; readonly y: number }>;
+  readonly descriptionFr: string;
 }
 
-// Test Suite Types
+export interface TownFlightPacket {
+  readonly id: string;
+  readonly packetType: TownPacketType;
+  readonly color: string;
+  readonly progress: number;
+  readonly currentLinkIndex: number;
+  readonly totalLinksInPath: number;
+  readonly currentHopNodeId: string;
+  readonly currentHopName: string;
+  readonly currentMedium: string;
+  readonly accumulatedLatencyUs: number;
+  readonly payloadBytes: number;
+  readonly ttl: number;
+  readonly status: 'TRAVELLING' | 'DELIVERED' | 'DROPPED_CONGESTION' | 'REROUTED' | 'DROPPED_CUT';
+  readonly pathLinkIds: string[];
+}
+
+export interface TownSimulationMetrics {
+  readonly totalPacketsEmitted: number;
+  readonly totalPacketsDelivered: number;
+  readonly totalPacketsDropped: number;
+  readonly totalPacketsRerouted: number;
+  readonly averageTransitLatencyUs: number;
+  readonly currentPhysicalPathLengthMeters: number;
+  readonly opticalSignalQualityDb: number;
+}
+
+// ========================================================
+// Bandwidth & Throughput Calculation Types
+// ========================================================
+
+export interface BandwidthCalculationParams {
+  readonly nominalBitrateMbps: number;
+  readonly payloadSizeBytes: number;
+  readonly mtuBytes: number;
+  readonly transportProtocol: TransportProtocol;
+  readonly packetLossRatePercent: number;
+  readonly rttMs: number;
+  readonly windowSizeBytes: number;
+  readonly enableJumboFrames: boolean;
+}
+
+export interface BandwidthCalculationResult {
+  readonly nominalBitrateBps: number;
+  readonly preambleBytes: number;
+  readonly ifgBytes: number;
+  readonly ethernetHeaderBytes: number;
+  readonly fcsBytes: number;
+  readonly totalL2OverheadBytes: number;
+  readonly ipHeaderBytes: number;
+  readonly transportHeaderBytes: number;
+  readonly totalHeadersBytes: number;
+  readonly onWireFrameTotalBytes: number;
+  readonly l2EfficiencyPercent: number;
+  readonly l4PayloadEfficiencyPercent: number;
+  readonly realThroughputMbps: number;
+  readonly goodputMbps: number;
+  readonly goodputMBS: number;
+  readonly maxPacketsPerSecond: number;
+  readonly bdpBytes: number;
+}
+
+// ========================================================
+// Route & Automated Test Suite Types
+// ========================================================
+
+export type AppRoute =
+  | 'tcp-engine'
+  | 'errors'
+  | 'town-transit'
+  | 'fragmentation'
+  | 'osi'
+  | 'tests';
+
 export interface TestCaseResult {
   readonly id: string;
   readonly name: string;
-  readonly category: 'OSI_ENCAPSULATION' | 'CRC32_PARITY' | 'L2_SWITCH' | 'L3_ROUTING' | 'BANDWIDTH_MATH' | 'UNITS_CONVERSION' | 'IP_FRAGMENTATION';
+  readonly category:
+    | 'TCP_CUBIC_WINDOW'
+    | 'CRC32_PARITY'
+    | 'TOWN_INTERCITY'
+    | 'IP_FRAGMENTATION'
+    | 'OSI_BANDWIDTH';
   readonly passed: boolean;
   readonly expected: string;
   readonly actual: string;
   readonly executionTimeMs: number;
-  readonly details?: string;
+  readonly details: string;
 }
 
 export interface TestSuiteReport {
